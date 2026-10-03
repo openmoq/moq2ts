@@ -3,6 +3,9 @@
 
 #include <QDir>
 #include <QFile>
+#include <QMap>
+#include <QStringList>
+#include <QtGlobal>
 #include <QTemporaryDir>
 
 #include <sys/stat.h>
@@ -38,16 +41,29 @@ QByteArray stream(const QList<std::pair<int, int>>& programs) {
     }
     return ts;
 }
+// Qt warnings logged since the last call to takeWarnings().
+QStringList& warnings() {
+    static QStringList list;
+    return list;
+}
+
+void captureWarning(QtMsgType type, const QMessageLogContext&, const QString& message) {
+    if (type == QtWarningMsg) {
+        warnings().append(message);
+    }
+}
+
 // Every packet the packetizer publishes, and the error that ends the track.
 struct Run {
     QList<QByteArray> packets;
     QString error;
 };
 
-Run publish(const QString& path, bool transparent, int program = 0) {
+Run publish(const QString& path, bool transparent, int program = 0, bool retainSi = false) {
     Run run;
     M2tsPacketizer packetizer(path);
     packetizer.setTransparent(transparent);
+    packetizer.setRetainSiTables(retainSi);
     if (!packetizer.open(program, &run.error)) {
         return run;
     }
@@ -69,6 +85,27 @@ QList<int> pids(const Run& run) {
     }
     return result;
 }
+// A packet on pid that carries a PCR (27 MHz) in its adaptation field.
+QByteArray pcrPacket(int pid, std::int64_t pcr, int cc) {
+    const std::int64_t base = pcr / 300;
+    const int extension = static_cast<int>(pcr % 300);
+    QByteArray packet;
+    packet.append(char(0x47));
+    packet.append(static_cast<char>((pid >> 8) & 0x1F));
+    packet.append(static_cast<char>(pid & 0xFF));
+    packet.append(static_cast<char>(0x30 | (cc & 0x0F)));
+    packet.append(char(7));                                    // adaptation_field_length
+    packet.append(char(0x10));                                 // PCR_flag
+    packet.append(static_cast<char>((base >> 25) & 0xFF));
+    packet.append(static_cast<char>((base >> 17) & 0xFF));
+    packet.append(static_cast<char>((base >> 9) & 0xFF));
+    packet.append(static_cast<char>((base >> 1) & 0xFF));
+    packet.append(static_cast<char>(((base & 0x01) << 7) | 0x7E | ((extension >> 8) & 0x01)));
+    packet.append(static_cast<char>(extension & 0xFF));
+    packet.append(QByteArray(188 - packet.size(), char(0)));
+    return packet;
+}
+
 // Opens path as a live source: a FIFO that a second thread fills with data.
 struct LiveRun {
     Run run;
@@ -414,10 +451,21 @@ int main() {
                              " live source without indicator: published from its first packet, no random access");
         }
 
+        // A live multiplex with a reference program (the first of the PAT,
+        // whose PMT is known) starts at that program's random access point and
+        // declares random access.
         const QByteArray multiplex = stream({{1, 0x1000}, {2, 0x1001}});
         const LiveRun live = publishLive(dir.filePath("live-m.fifo"), multiplex, true);
-        ok &= expect(!live.randomAccess && live.run.packets.size() == 5 && live.initData.isEmpty(),
-                     "live multiplex: lead-in kept, no random access, no initData");
+        ok &= expect(live.randomAccess && !live.run.packets.isEmpty() && live.run.packets.first() == rap &&
+                         live.firstStartsGroup && live.initData.isEmpty(),
+                     "live multiplex: starts at the reference program's RAP, declares random access");
+        // Without a reference program (no PMT known), it keeps its lead-in and
+        // declares nothing.
+        QByteArray noReference = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}));
+        noReference += single.mid(2 * 188);
+        const LiveRun none = publishLive(dir.filePath("live-m-none.fifo"), noReference, true);
+        ok &= expect(!none.randomAccess && none.run.packets.size() == 4,
+                     "live multiplex without a reference program: lead-in kept, no random access");
     }
 
     // Group boundaries follow the video PID's random_access_indicator, also
@@ -447,6 +495,231 @@ int main() {
             const LiveRun live = publishLive(dir.filePath(transparent ? "sep-pcr-u.fifo" : "sep-pcr-p.fifo"), ts, transparent);
             ok &= expect(live.randomAccess && live.firstStartsGroup, label + ", live: random access declared");
         }
+    }
+
+    // Conditional access: a scrambled MPTS with one CA system per program. The
+    // per-program track keeps its ECMs (from the PMT), the CAT, and the EMMs of
+    // its CA system (from the CAT). The CAT lists only that system.
+    {
+        const QByteArray pat = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}));
+        const QByteArray pmt1 = tb::psiPacket(0x1000, tb::pmtSectionWithDescriptors(
+            1, 0x100, tb::caDescriptor(0x0B00, 0x600), {{0x1B, 0x100, {}}, {0x0F, 0x101, tb::caDescriptor(0x0B00, 0x602)}}));
+        const QByteArray pmt2 = tb::psiPacket(0x1001, tb::pmtSectionWithDescriptors(
+            2, 0x200, tb::caDescriptor(0x0500, 0x601), {{0x1B, 0x200, {}}}));
+        const QByteArray catBytes = tb::catSection(tb::caDescriptor(0x0B00, 0x700) + tb::caDescriptor(0x0500, 0x701));
+        // A later CAT version adds a second EMM stream for the program's CA system.
+        const QByteArray catChanged = tb::catSection(tb::caDescriptor(0x0B00, 0x700) + tb::caDescriptor(0x0500, 0x701) +
+                                                     tb::caDescriptor(0x0B00, 0x703), 1);
+        const auto data = [](int pid, int cc) { return tb::tsPacket(pid, false, QByteArray(184, char(0)), cc); };
+        QByteArray ts = pat + pmt1 + pmt2;
+        for (int repeat = 0; repeat < 3; ++repeat) {
+            ts += tb::psiPacket(0x0001, repeat < 2 ? catBytes : catChanged, repeat);
+            for (int pid : {0x600, 0x601, 0x602, 0x700, 0x701, 0x703, 0x100, 0x200}) {
+                ts += data(pid, repeat);
+            }
+        }
+        const QString path = dir.filePath("scrambled.ts");
+        ok &= expect(writeFile(path, ts), "write scrambled MPTS");
+        const Run run = publish(path, false, 1);
+        const QList<int> out = pids(run);
+        ok &= expect(out.count(0x600) == 3 && out.count(0x602) == 3, "CA: program and ES ECMs kept");
+        ok &= expect(out.count(0x700) == 3, "CA: EMM of the program's CA system kept");
+        ok &= expect(out.count(0x703) == 1, "CA: an EMM PID that a new CAT adds is kept from then on");
+        ok &= expect(!out.contains(0x601) && !out.contains(0x701) && !out.contains(0x200), "CA: other program's CA PIDs dropped");
+        moq2ts::PsiAssembler assembler;
+        QList<QByteArray> cats;
+        for (const QByteArray& packet : run.packets) {
+            if (pidOfPacket(packet) == 0x0001) {
+                for (const auto& section : assembler.push(packet, packet)) {
+                    cats.append(section.bytes);
+                }
+            }
+        }
+        ok &= expect(cats.size() == 3 && cats.at(0) == tb::catSection(tb::caDescriptor(0x0B00, 0x700)) && cats.at(1) == cats.at(0),
+                     "CA: CAT lists only the program's CA system, version 0 on repeat, valid CRC_32");
+        ok &= expect(cats.value(2) == tb::catSection(tb::caDescriptor(0x0B00, 0x700) + tb::caDescriptor(0x0B00, 0x703), 1),
+                     "CA: the changed CAT moves to version 1");
+
+        // A clear program of the same multiplex gets no CAT and no CA PIDs.
+        QByteArray clear = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {3, 0x1003}}));
+        clear += tb::psiPacket(0x1003, tb::pmtSection(3, 0x300, {{0x1B, 0x300}}));
+        clear += tb::psiPacket(0x0001, catBytes) + data(0x700, 0) + data(0x300, 0);
+        const QString clearPath = dir.filePath("clear-in-scrambled.ts");
+        ok &= expect(writeFile(clearPath, clear), "write clear-program stream");
+        ok &= expect(pids(publish(clearPath, false, 3)) == QList<int>({0x0000, 0x1003, 0x300}),
+                     "CA: a clear program gets no CAT and no EMM");
+    }
+
+    // SI rewrite with --retain-si: the SDT actual keeps the carried service in
+    // one section; SDT other and EIT other go; EIT actual keeps the carried
+    // service's sections unchanged; the BAT and the TDT pass unchanged.
+    {
+        const QByteArray name1("\x48\x03\x01\x00\x00", 5);   // a short service_descriptor
+        const QByteArray sdtActual0 = tb::longSection(0x42, 1, tb::sdtBody(0x22, {{2, {}}, {3, {}}}), 4, 0, 1);
+        const QByteArray sdtActual1 = tb::longSection(0x42, 1, tb::sdtBody(0x22, {{1, name1}}), 4, 1, 1);
+        const QByteArray sdtOther = tb::longSection(0x46, 9, tb::sdtBody(0x22, {{1, {}}}));
+        const QByteArray bat = tb::longSection(0x4A, 0x1234, QByteArray("\xF0\x00\xF0\x00", 4));
+        const QByteArray eitService1 = tb::longSection(0x4E, 1, QByteArray(6, char(0)));
+        const QByteArray eitService2 = tb::longSection(0x4E, 2, QByteArray(6, char(0)));
+        const QByteArray eitSchedule1 = tb::longSection(0x50, 1, QByteArray(6, char(0)));
+        const QByteArray eitOther = tb::longSection(0x4F, 1, QByteArray(6, char(0)));
+        QByteArray tdt("\x70\x70\x05\xE0\x00\x12\x00\x00", 8);   // section without CRC_32
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}, {3, 0x1002}}));
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+        for (int repeat = 0; repeat < 2; ++repeat) {
+            int sdtCc = repeat * 4;
+            for (const QByteArray& section : {sdtActual0, sdtActual1, sdtOther, bat}) {
+                ts += tb::psiPacket(0x0011, section, sdtCc++);
+            }
+            int eitCc = repeat * 4;
+            for (const QByteArray& section : {eitService1, eitService2, eitSchedule1, eitOther}) {
+                ts += tb::psiPacket(0x0012, section, eitCc++);
+            }
+            ts += tb::psiPacket(0x0014, tdt, repeat);
+        }
+        const QString path = dir.filePath("si.ts");
+        ok &= expect(writeFile(path, ts), "write SI stream");
+
+        const Run run = publish(path, false, 1, true);
+        QMap<int, QList<QByteArray>> tables;
+        QMap<int, moq2ts::PsiAssembler> assemblers;
+        for (const QByteArray& packet : run.packets) {
+            const int pid = pidOfPacket(packet);
+            if (pid == 0x0011 || pid == 0x0012) {
+                for (const auto& section : assemblers[pid].push(packet, packet)) {
+                    tables[pid].append(section.bytes);
+                }
+            }
+        }
+        const QByteArray sdtExpected = tb::longSection(0x42, 1, tb::sdtBody(0x22, {{1, name1}}), 0, 0, 0);
+        ok &= expect(tables.value(0x0011) == QList<QByteArray>({sdtExpected, bat, sdtExpected, bat}),
+                     "SI: SDT actual reduced to service 1, version 0 on repeat; SDT other dropped; BAT unchanged");
+        ok &= expect(tables.value(0x0012) == QList<QByteArray>({eitService1, eitSchedule1, eitService1, eitSchedule1}),
+                     "SI: EIT actual of service 1 kept unchanged; other services and EIT other dropped");
+        QList<QByteArray> tdtOut;
+        for (const QByteArray& packet : run.packets) {
+            if (pidOfPacket(packet) == 0x0014) {
+                tdtOut.append(packet);
+            }
+        }
+        ok &= expect(tdtOut.size() == 2 && tdtOut.at(0) == ts.mid(ts.indexOf(tb::psiPacket(0x0014, tdt, 0)), 188),
+                     "SI: TDT passes unchanged");
+        ok &= expect(!pids(publish(path, false, 1, false)).contains(0x0011), "SI: without --retain-si, no SI is kept");
+    }
+
+    // Mux rate: a CBR SPTS at 3,008,000 bit/s (2,000 packets per second) with
+    // a PCR every 100 packets gives exactly that rate. One PCR, no null
+    // packets, or an MPTS give no value.
+    {
+        const auto stream = [](const QList<std::pair<int, int>>& programs, int pcrEvery, int nullEvery, int packets) {
+            QByteArray ts = tb::psiPacket(0x0000, tb::patSection(programs));
+            ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+            int videoCc = 0;
+            for (int index = 2; index < packets; ++index) {
+                if (index % pcrEvery == 0) {
+                    ts += pcrPacket(0x100, static_cast<std::int64_t>(index) * 13500, videoCc++);   // 27e6 / 2000
+                } else if (nullEvery > 0 && index % nullEvery == 0) {
+                    ts += tb::tsPacket(0x1FFF, false, QByteArray(184, char(0xFF)));
+                } else {
+                    ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), videoCc++);
+                }
+            }
+            return ts;
+        };
+        const auto measure = [&](const QString& name, const QByteArray& ts, QString* note) {
+            const QString path = dir.filePath(name);
+            writeFile(path, ts);
+            M2tsPacketizer packetizer(path);
+            QString error;
+            packetizer.open(0, &error);
+            *note = packetizer.muxRateNote();
+            return packetizer.measuredMuxRate();
+        };
+        QString note;
+        ok &= expect(measure("cbr.ts", stream({{1, 0x1000}}, 100, 3, 3000), &note) == 3008000 && note.isEmpty(),
+                     "mux rate: CBR SPTS measured exactly");
+        ok &= expect(measure("one-pcr.ts", stream({{1, 0x1000}}, 5000, 3, 3000), &note) == 0 && note.contains("two PCRs"),
+                     "mux rate: one PCR gives no value");
+        ok &= expect(measure("vbr.ts", stream({{1, 0x1000}}, 100, 0, 3000), &note) == 0 && note.contains("VBR"),
+                     "mux rate: no null packets gives no value");
+        ok &= expect(measure("mpts-rate.ts", stream({{1, 0x1000}, {2, 0x1001}}, 100, 3, 3000), &note) == 0,
+                     "mux rate: not measured for an MPTS");
+    }
+
+    // A multiplex track goes on when its reference program leaves the PAT: the
+    // multiplex is still valid, and the reference fields are advisory.
+    {
+        const QByteArray video = tb::tsPacket(0x100, false, QByteArray(184, char(0)));
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}, 0), 0);
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + video;
+        ts += tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}}, 1), 1) + video;
+        const QString path = dir.filePath("reference-leaves.ts");
+        ok &= expect(writeFile(path, ts), "write reference-leaves stream");
+        const Run run = publish(path, true);
+        ok &= expect(run.error.isEmpty() && run.packets.size() == 5, "multiplex: the track goes on");
+
+        // Groups go on, on the video of the first program still listed, once its
+        // PMT arrives. An audio indicator before that PMT starts no Group.
+        const auto rap = [](int pid, int cc) { return tb::tsPacket(pid, true, tb::pesHeaderWithPts(9000 * cc), cc, 0x40); };
+        QByteArray moved = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}}, 0), 0);
+        moved += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) + rap(0x100, 0) + rap(0x100, 1);
+        moved += tb::psiPacket(0x0000, tb::patSection({{2, 0x1001}}, 1), 1) + rap(0x201, 0);
+        moved += tb::psiPacket(0x1001, tb::pmtSection(2, 0x200, {{0x1B, 0x200}, {0x0F, 0x201}})) + rap(0x200, 0) + rap(0x200, 1);
+        const QString movedPath = dir.filePath("reference-moves.ts");
+        ok &= expect(writeFile(movedPath, moved), "write reference-moves stream");
+        M2tsPacketizer packetizer(movedPath);
+        packetizer.setTransparent(true);
+        QString error;
+        ok &= expect(packetizer.open(0, &error), "reference moves: opens");
+        M2tsObject object;
+        QList<int> groupPids;
+        while (packetizer.readObject(1, &object, &error)) {
+            if (object.startsGroup) {
+                groupPids.append(pidOfPacket(object.payload));
+            }
+        }
+        ok &= expect(groupPids == QList<int>({0x100, 0x100, 0x200, 0x200}),
+                     "multiplex: Groups follow the next program's video after the reference program leaves");
+    }
+
+    // An SDT that never lists the service is dropped, with one warning.
+    {
+        const QByteArray sdt = tb::longSection(0x42, 1, tb::sdtBody(0x22, {{7, {}}}));
+        QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+        ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+        ts += tb::psiPacket(0x0011, sdt, 0) + tb::psiPacket(0x0011, sdt, 1);
+        const QString path = dir.filePath("sdt-no-service.ts");
+        ok &= expect(writeFile(path, ts), "write SDT-without-service stream");
+        qInstallMessageHandler(captureWarning);
+        warnings().clear();
+        const Run run = publish(path, false, 0, true);
+        qInstallMessageHandler(nullptr);
+        ok &= expect(!pids(run).contains(0x0011) && warnings().filter("lists no service").size() == 1,
+                     "SDT without the service: dropped, one warning");
+    }
+
+    // Groups longer than 2 seconds give one warning; Groups 2 seconds apart do
+    // not.
+    {
+        const auto gops = [](std::uint64_t spacing90k) {
+            QByteArray ts = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+            ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+            for (int gop = 0; gop < 3; ++gop) {
+                ts += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(900000 + gop * spacing90k), gop, 0x40);
+            }
+            return ts;
+        };
+        qInstallMessageHandler(captureWarning);
+        for (const auto& [spacing, expected] : {std::pair{std::uint64_t{180000}, 0}, std::pair{std::uint64_t{270000}, 1}}) {
+            warnings().clear();
+            const QString path = dir.filePath(QStringLiteral("gop-%1.ts").arg(spacing));
+            writeFile(path, gops(spacing));
+            publish(path, false);
+            const int count = static_cast<int>(warnings().filter("longer than the 2 s").size());
+            ok &= expect(count == expected, "Group duration warning for a spacing of " + std::to_string(spacing / 90) +
+                                                " ms: " + std::to_string(count));
+        }
+        qInstallMessageHandler(nullptr);
     }
 
     // Object media time: the PTS of the first video PES in each Object, on the

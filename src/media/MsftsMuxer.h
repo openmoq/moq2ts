@@ -22,6 +22,8 @@ struct MsftsCatalog {
     int packetSize = 188;
     // Encoder-only knob (source packets per Object); not a catalog field.
     int packetsPerObject = 7;
+    // The carried program, or in unmodified-multiplex the reference program,
+    // named in the catalog only when pcrPid >= 0.
     int programNumber = 1;
     int pcrPid = -1;
     // draft-gregoire-moq-msfts mpeg2tsSiPids: SI table PIDs retained in the

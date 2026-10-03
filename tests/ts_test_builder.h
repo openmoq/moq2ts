@@ -83,6 +83,91 @@ inline QByteArray pmtSection(int programNumber, int pcrPid, const QList<std::pai
     return finishSection(section);
 }
 
+// A CA_descriptor (tag 0x09): CA_system_id and CA_PID.
+inline QByteArray caDescriptor(int caSystemId, int caPid) {
+    QByteArray descriptor;
+    descriptor.append(char(0x09));
+    descriptor.append(char(0x04));
+    appendU16(&descriptor, caSystemId);
+    appendU16(&descriptor, 0xE000 | caPid);
+    return descriptor;
+}
+
+// A PMT with descriptors: programInfo for the program loop, and per stream
+// (stream_type, PID, ES_info descriptors).
+struct PmtStream {
+    int streamType;
+    int pid;
+    QByteArray esInfo;
+};
+
+inline QByteArray pmtSectionWithDescriptors(int programNumber, int pcrPid, const QByteArray& programInfo,
+                                            const QList<PmtStream>& streams, int version = 0) {
+    QByteArray section;
+    section.append(char(0x02));
+    section.append(char(0xB0));
+    section.append(char(0x00));
+    appendU16(&section, programNumber);
+    section.append(static_cast<char>(0xC1 | ((version & 0x1F) << 1)));
+    section.append(char(0x00));
+    section.append(char(0x00));
+    appendU16(&section, 0xE000 | pcrPid);
+    appendU16(&section, 0xF000 | static_cast<int>(programInfo.size()));
+    section.append(programInfo);
+    for (const PmtStream& stream : streams) {
+        section.append(static_cast<char>(stream.streamType));
+        appendU16(&section, 0xE000 | stream.pid);
+        appendU16(&section, 0xF000 | static_cast<int>(stream.esInfo.size()));
+        section.append(stream.esInfo);
+    }
+    return finishSection(section);
+}
+
+// Any long-form section: table_id, table_id_extension, the body after
+// last_section_number, a version, and section numbers.
+inline QByteArray longSection(int tableId, int extension, const QByteArray& body, int version = 0,
+                              int sectionNumber = 0, int lastSectionNumber = 0) {
+    QByteArray section;
+    section.append(static_cast<char>(tableId));
+    section.append(char(0xF0));          // section_syntax_indicator, reserved_future_use
+    section.append(char(0x00));
+    appendU16(&section, extension);
+    section.append(static_cast<char>(0xC1 | ((version & 0x1F) << 1)));
+    section.append(static_cast<char>(sectionNumber));
+    section.append(static_cast<char>(lastSectionNumber));
+    section.append(body);
+    return finishSection(section);
+}
+
+// An SDT body: original_network_id, a reserved octet, and per service
+// (service_id, descriptors).
+inline QByteArray sdtBody(int originalNetworkId, const QList<std::pair<int, QByteArray>>& services) {
+    QByteArray body;
+    appendU16(&body, originalNetworkId);
+    body.append(char(0xFF));
+    for (const auto& [serviceId, descriptors] : services) {
+        appendU16(&body, serviceId);
+        body.append(char(0xFC));         // reserved, no EIT flags
+        appendU16(&body, 0x8000 | static_cast<int>(descriptors.size()));   // running
+        body.append(descriptors);
+    }
+    return body;
+}
+
+// A CAT (table_id 0x01) with the given descriptors.
+inline QByteArray catSection(const QByteArray& descriptors, int version = 0) {
+    QByteArray section;
+    section.append(char(0x01));
+    section.append(char(0xB0));
+    section.append(char(0x00));
+    appendU16(&section, 0xFFFF);         // reserved table_id_extension
+    section.append(static_cast<char>(0xC1 | ((version & 0x1F) << 1)));
+    section.append(char(0x00));
+    section.append(char(0x00));
+    section.append(descriptors);
+    return finishSection(section);
+}
+
 // One TS packet on pid. When adaptation is set, the packet carries an adaptation
 // field with the given flags byte (0x40 = random_access_indicator). The payload
 // is padded with 0xFF stuffing.

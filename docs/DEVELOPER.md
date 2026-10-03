@@ -98,6 +98,12 @@ media publishing. It currently provides:
     packets in source-packet form, and exposes them for catalog `initData`.
   - Filters MPTS inputs down to the selected program's PSI/PCR/elementary PIDs
     before objectization, with a PAT rewritten to list that program only.
+  - Keeps the conditional access packets of the selected program: the ECM
+    PIDs of its PMT CA_descriptors, the CAT rewritten to the CA systems those
+    ECMs use, and the EMM PIDs that the CAT gives for them.
+  - With `--retain-si`, reduces the SDT actual to the carried service and
+    keeps only that service's EIT actual sections. SDT other and EIT other
+    go. The NIT, BAT, TDT, and TOT pass unchanged.
   - Follows PAT and PMT changes during the session. A per-program track ends
     when its program leaves the PAT. An unmodified-program track ends when the
     PAT no longer lists its program alone. When the change alters initData,
@@ -262,10 +268,10 @@ capture catalog (`per-program`) looks like:
 
 An `--unmodified` track is `unmodified-program` when the source PAT lists one
 program. It then carries `mpeg2tsProgramNumber` and `mpeg2tsPcrPid` like a
-`per-program` track. Otherwise it is `unmodified-multiplex`, which omits
-`mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, `mpeg2tsMuxRate`, and
-`mpeg2tsSiPids` — the draft requires them absent when the publisher selects
-no program.
+`per-program` track. Otherwise it is `unmodified-multiplex`. Its
+`mpeg2tsProgramNumber` and `mpeg2tsPcrPid` then name a reference program,
+the first of the PAT or the `--program` one, on whose PCR a subscriber paces
+the multiplex. It never carries `mpeg2tsMuxRate` or `mpeg2tsSiPids`.
 
 Field presence is conditional:
 
@@ -275,9 +281,10 @@ Field presence is conditional:
   is the inverse — VOD only, present only when `isLive` is false and the value is
   positive (MSF 5.1.37).
 - `bitrate` is emitted only when greater than zero.
-- `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, and `mpeg2tsMuxRate` are emitted
-  in every mode except `unmodified-multiplex`; `mpeg2tsPcrPid` is further
-  gated on being known (PID >= 0), and `mpeg2tsMuxRate` on being positive.
+- `mpeg2tsProgramNumber` and `mpeg2tsPcrPid` are emitted in every mode when
+  `mpeg2tsPcrPid` is known (PID >= 0), and always outside
+  `unmodified-multiplex`. `mpeg2tsMuxRate` is emitted outside
+  `unmodified-multiplex` when positive.
 - `mpeg2tsSiPids` is emitted only in `per-program` mode.
 - `mpeg2tsTimestampMode` is valid only for 192-octet source packets and MUST
   NOT appear for 188.
@@ -285,8 +292,10 @@ Field presence is conditional:
   Group contains a random access point. A live source (pipe, FIFO, SRT)
   drops the packets before its first random access point and declares it,
   if the source sets the random_access_indicator on its video PID (or on the
-  PCR PID without video), except for `unmodified-multiplex`. A file keeps
-  byte 0 and does not.
+  PCR PID without video). On `unmodified-multiplex`, these are the points of
+  the reference program, and a multiplex without one declares nothing. A
+  file keeps byte 0 and does not declare it. Groups longer than 2 seconds
+  give one warning.
 
 ## Timeline track
 

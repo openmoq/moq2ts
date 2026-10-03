@@ -94,7 +94,26 @@ bool isVideoStreamType(int streamType) {
     }
 }
 
-bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryPids, int* videoPid) {
+// The CA_descriptors (tag 0x09) in the descriptor loop [from, to): their
+// CA_PIDs and CA_system_ids.
+void readCaDescriptors(const QByteArray& section, int from, int to, std::set<int>* caPids, std::set<int>* caSystems) {
+    for (int offset = from; offset + 2 <= to;) {
+        const int tag = static_cast<unsigned char>(section[offset]);
+        const int length = static_cast<unsigned char>(section[offset + 1]);
+        if (tag == 0x09 && length >= 4 && offset + 2 + length <= to) {
+            caSystems->insert((static_cast<unsigned char>(section[offset + 2]) << 8) |
+                              static_cast<unsigned char>(section[offset + 3]));
+            caPids->insert(((static_cast<unsigned char>(section[offset + 4]) & 0x1F) << 8) |
+                           static_cast<unsigned char>(section[offset + 5]));
+        }
+        offset += 2 + length;
+    }
+}
+
+// The PMT fields the packetizer uses. The CA_descriptors of the program loop
+// and of each ES loop give the ECM PIDs and the CA systems in use.
+bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryPids, int* videoPid,
+              std::set<int>* ecmPids, std::set<int>* caSystems) {
     if (section.size() < 16 || static_cast<unsigned char>(section[0]) != 0x02) {
         return false;
     }
@@ -106,11 +125,14 @@ bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryP
     }
 
     elementaryPids->clear();
+    ecmPids->clear();
+    caSystems->clear();
     *videoPid = -1;
     *pcrPid = ((static_cast<unsigned char>(section[8]) & 0x1f) << 8) |
               static_cast<unsigned char>(section[9]);
     const int programInfoLength = ((static_cast<unsigned char>(section[10]) & 0x0f) << 8) |
                                   static_cast<unsigned char>(section[11]);
+    readCaDescriptors(section, 12, std::min(12 + programInfoLength, sectionEnd), ecmPids, caSystems);
     int offset = 12 + programInfoLength;
     while (offset + 5 <= sectionEnd) {
         const int streamType = static_cast<unsigned char>(section[offset]);
@@ -119,6 +141,7 @@ bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryP
         const int esInfoLength = ((static_cast<unsigned char>(section[offset + 3]) & 0x0f) << 8) |
                                  static_cast<unsigned char>(section[offset + 4]);
         elementaryPids->insert(elementaryPid);
+        readCaDescriptors(section, offset + 5, std::min(offset + 5 + esInfoLength, sectionEnd), ecmPids, caSystems);
         if (*videoPid < 0 && isVideoStreamType(streamType)) {
             *videoPid = elementaryPid;
         }
@@ -246,6 +269,85 @@ int startingSectionNumber(const QByteArray& tsPacket) {
     return start + 6 < tsPacket.size() ? static_cast<unsigned char>(tsPacket[start + 6]) : -1;
 }
 
+QList<QByteArray> SectionRewriter::push(const QByteArray& tsPacket, const QByteArray& sourcePacket,
+                                       const Filter& filter) {
+    QList<QByteArray> out;
+    for (const PsiAssembler::Section& section : m_assembler.push(tsPacket, sourcePacket)) {
+        const Decision decision = filter(section.bytes);
+        if (decision.kind == Decision::Keep) {
+            out += packets(section.bytes, tsPacket, sourcePacket);
+        } else if (decision.kind == Decision::Replace) {
+            out += packets(versioned(decision.section), tsPacket, sourcePacket);
+        }
+    }
+    return out;
+}
+
+QByteArray SectionRewriter::versioned(QByteArray section) {
+    // A long-form section: version_number sits in bits 5 to 1 of octet 5, and
+    // the section ends with its CRC_32. section_length must already count the
+    // CRC_32 octets.
+    const int length = 3 + (((static_cast<unsigned char>(section[1]) & 0x0F) << 8) |
+                            static_cast<unsigned char>(section[2]));
+    section.resize(length);   // drops a stale CRC_32 beyond the length, or makes room
+    QByteArray content = section.left(length - 4);
+    content[5] = static_cast<char>(static_cast<unsigned char>(content[5]) & 0xC1);
+    const std::pair<int, int> key{static_cast<unsigned char>(section[0]),
+                                  (static_cast<unsigned char>(section[3]) << 8) | static_cast<unsigned char>(section[4])};
+    auto& [lastContent, version] = m_versions.try_emplace(key, QByteArray(), -1).first->second;
+    if (content != lastContent) {
+        lastContent = content;
+        version = (version + 1) & 0x1F;   // 0 for the first table
+    }
+    section[5] = static_cast<char>((static_cast<unsigned char>(section[5]) & 0xC1) | (version << 1));
+    const std::uint32_t crc = mpegCrc32(section.constData(), length - 4);
+    for (int index = 0; index < 4; ++index) {
+        section[length - 4 + index] = static_cast<char>((crc >> (24 - 8 * index)) & 0xFF);
+    }
+    return section;
+}
+
+QList<QByteArray> SectionRewriter::packets(const QByteArray& section, const QByteArray& tsPacket,
+                                           const QByteArray& sourcePacket) {
+    // Each section starts a packet, with pointer_field 0, and the last packet
+    // ends with 0xFF stuffing. A 192-octet packet keeps the prefix of the
+    // source packet that completed the section.
+    QList<QByteArray> out;
+    const QByteArray prefix = sourcePacket.left(sourcePacket.size() - 188);
+    qsizetype position = 0;
+    while (position < section.size() || out.isEmpty()) {
+        QByteArray packet = prefix;
+        packet.append(char(0x47));
+        packet.append(static_cast<char>((out.isEmpty() ? 0x40 : 0x00) | (static_cast<unsigned char>(tsPacket[1]) & 0x1F)));
+        packet.append(tsPacket[2]);
+        packet.append(static_cast<char>(0x10 | m_continuityCounter));
+        m_continuityCounter = (m_continuityCounter + 1) & 0x0F;
+        if (out.isEmpty()) {
+            packet.append(char(0x00));   // pointer_field
+        }
+        const qsizetype room = prefix.size() + 188 - packet.size();
+        packet.append(section.mid(position, room));
+        position += room;
+        packet.append(QByteArray(prefix.size() + 188 - packet.size(), char(0xFF)));
+        out.append(packet);
+    }
+    return out;
+}
+
+std::int64_t pcrOf(const QByteArray& tsPacket) {
+    // adaptation_field_control 2 or 3, adaptation_field_length of at least 7,
+    // and PCR_flag (0x10): program_clock_reference_base (33 bits) and _extension
+    // (9 bits).
+    if (tsPacket.size() < 12 || ((static_cast<unsigned char>(tsPacket[3]) >> 4) & 0x02) == 0 ||
+        static_cast<unsigned char>(tsPacket[4]) < 7 || (static_cast<unsigned char>(tsPacket[5]) & 0x10) == 0) {
+        return -1;
+    }
+    const auto byte = [&](int index) { return static_cast<std::int64_t>(static_cast<unsigned char>(tsPacket[index])); };
+    const std::int64_t base = (byte(6) << 25) | (byte(7) << 17) | (byte(8) << 9) | (byte(9) << 1) | (byte(10) >> 7);
+    const std::int64_t extension = ((byte(10) & 0x01) << 8) | byte(11);
+    return base * 300 + extension;
+}
+
 std::int64_t pesPts(const QByteArray& tsPacket) {
     if (!payloadUnitStart(tsPacket)) {
         return -1;
@@ -326,6 +428,12 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
         if (!psiFound || !selectProgramPids(error)) {
             return false;
         }
+        // Draft "Mux Rate": a publisher that removes null packets SHOULD
+        // declare the rate; for a single-program source it is the nominal mux
+        // rate of the source, which the PCR gives.
+        if (!m_retainNullPackets && m_patProgramCount == 1) {
+            measureMuxRate();
+        }
     } else if (!psiFound) {
         // Non-fatal for unmodified carriage: without the PCR PID, the group
         // boundaries latch on the first PID with a random access indicator.
@@ -346,9 +454,11 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     m_initDataChanged = false;
     // A live track drops the packets before its first random access point, so
     // that every Group starts at one (draft "Group Boundaries"). A file keeps
-    // byte 0, and a multiplex keeps its lead-in. The random_access_indicator is
-    // optional, so the track declares random access only if one appears.
-    m_dropLeadIn = m_sequential && !(m_transparent && m_patProgramCount != 1) && findRandomAccess();
+    // byte 0. On a multiplex, the points are those of the reference program,
+    // so a multiplex without one keeps its lead-in. The random_access_indicator
+    // is optional, so the track declares random access only if one appears.
+    const bool multiplex = m_transparent && m_patProgramCount != 1;
+    m_dropLeadIn = m_sequential && (!multiplex || m_pcrPid >= 0) && findRandomAccess();
     // readObject reads the PSI again from the start, so the assemblers restart.
     // The stored tables stay, so the same tables count as repeats.
     m_patAssembler.reset();
@@ -530,6 +640,20 @@ void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
         endTrack(QStringLiteral("Program %1 left the source PAT; the track ends.").arg(m_programNumber));
         return;
     }
+    if (!listed && !programs.empty()) {
+        // Unmodified-multiplex: the reference program left the PAT. The track
+        // goes on, and the catalog's reference fields are now stale advisory
+        // values. Group boundaries move to the first program still listed,
+        // once its PMT arrives; no PID latches before that.
+        qWarning("Reference program %d left the PAT; Groups now follow program %d, and the catalog's "
+                 "reference program is stale until the track restarts.",
+                 m_programNumber, programs.front().first);
+        m_programNumber = programs.front().first;
+        m_pmtPid = programs.front().second;
+        m_pmtAssembler.reset();
+        m_pmt = {};
+        m_rapPid = kAwaitingPmt;
+    }
     if (listed && pmtPid != m_pmtPid) {
         qWarning("Program %d moved its PMT from PID %d to PID %d.", m_programNumber, m_pmtPid, pmtPid);
         m_pmtPid = pmtPid;
@@ -541,6 +665,132 @@ void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
         selectPids();
     }
     refreshInitData();
+}
+
+SectionRewriter* M2tsPacketizer::rewriterFor(int pid) {
+    if (pid == 0x0001) {
+        return &m_catRewriter;
+    }
+    // With --retain-si, the SDT and the EIT keep only the carried service
+    // (draft "Per-Program": SHOULD rewrite the SI). The NIT, TDT, and TOT pass
+    // unchanged.
+    if (m_retainSiTables && pid == 0x0011) {
+        return &m_sdtRewriter;
+    }
+    if (m_retainSiTables && pid == 0x0012) {
+        return &m_eitRewriter;
+    }
+    return nullptr;
+}
+
+SectionRewriter::Decision M2tsPacketizer::rewriteSection(int pid, const QByteArray& section) {
+    using Decision = SectionRewriter::Decision;
+    if (section.size() < 12) {
+        return Decision{};   // shorter than any long-form section with a CRC_32
+    }
+    const int tableId = static_cast<unsigned char>(section[0]);
+    if (pid == 0x0001) {
+        return tableId == 0x01 ? rewriteCat(section) : Decision{};
+    }
+    if (pid == 0x0011) {
+        // SDT actual: the carried service only. SDT other describes other
+        // transport streams. The BAT passes unchanged.
+        if (tableId == 0x42) {
+            return rewriteSdt(section);
+        }
+        return tableId == 0x46 ? Decision{} : Decision{Decision::Keep, {}};
+    }
+    if (pid == 0x0012) {
+        // EIT actual, present/following (0x4E) and schedule (0x50 to 0x5F):
+        // the sections of the carried service, unchanged. EIT other (0x4F,
+        // 0x60 to 0x6F) describes other transport streams.
+        const int serviceId = (static_cast<unsigned char>(section[3]) << 8) | static_cast<unsigned char>(section[4]);
+        if (tableId == 0x4E || (tableId >= 0x50 && tableId <= 0x5F)) {
+            return serviceId == m_programNumber ? Decision{Decision::Keep, {}} : Decision{};
+        }
+        return tableId == 0x4F || (tableId >= 0x60 && tableId <= 0x6F) ? Decision{} : Decision{Decision::Keep, {}};
+    }
+    return Decision{};
+}
+
+SectionRewriter::Decision M2tsPacketizer::rewriteSdt(const QByteArray& section) {
+    // The service loop starts after original_network_id and a reserved octet.
+    // In DVB, the service_id equals the program_number. The section that holds
+    // the carried service becomes the only section (section_number and
+    // last_section_number 0); the others go.
+    const int end = static_cast<int>(section.size()) - 4;
+    const int version = (static_cast<unsigned char>(section[5]) >> 1) & 0x1F;
+    const int number = static_cast<unsigned char>(section[6]);
+    const int last = static_cast<unsigned char>(section[7]);
+    for (int offset = 11; offset + 5 <= end;) {
+        const int serviceId = (static_cast<unsigned char>(section[offset]) << 8) | static_cast<unsigned char>(section[offset + 1]);
+        const int loopLength = ((static_cast<unsigned char>(section[offset + 3]) & 0x0F) << 8) |
+                               static_cast<unsigned char>(section[offset + 4]);
+        if (offset + 5 + loopLength > end) {
+            break;
+        }
+        if (serviceId == m_programNumber) {
+            m_sdtServiceVersion = version;
+            QByteArray rewritten = section.left(11) + section.mid(offset, 5 + loopLength) + QByteArray(4, char(0));
+            rewritten[6] = char(0x00);   // section_number
+            rewritten[7] = char(0x00);   // last_section_number
+            const int sectionLength = static_cast<int>(rewritten.size()) - 3;
+            rewritten[1] = static_cast<char>((static_cast<unsigned char>(rewritten[1]) & 0xF0) | ((sectionLength >> 8) & 0x0F));
+            rewritten[2] = static_cast<char>(sectionLength & 0xFF);
+            return SectionRewriter::Decision{SectionRewriter::Decision::Replace, rewritten};
+        }
+        offset += 5 + loopLength;
+    }
+    // In DVB the service_id equals the program_number. Say once when no
+    // section of an SDT version lists the service, so that the SDT goes.
+    if (number == last && m_sdtServiceVersion != version && !m_warnedSdtNoService) {
+        m_warnedSdtNoService = true;
+        qWarning("An SDT section lists no service %d; it is dropped. In DVB the service_id equals the "
+                 "program_number.", m_programNumber);
+    }
+    return SectionRewriter::Decision{};
+}
+
+SectionRewriter::Decision M2tsPacketizer::rewriteCat(const QByteArray& section) {
+    // An EMM stream belongs to a CA system, so the entries of the carried
+    // program are the CA_descriptors of the CA systems that its ECMs use
+    // (draft "Per-Program": SHOULD rewrite the CAT). Other descriptors stay.
+    // A program that uses no CA system needs no CAT.
+    if (m_caSystems.empty()) {
+        if (!m_emmPids.empty()) {
+            m_emmPids.clear();
+            selectPids();
+        }
+        return SectionRewriter::Decision{};
+    }
+    const int end = static_cast<int>(section.size()) - 4;
+    QByteArray kept;
+    std::set<int> emmPids;
+    for (int offset = 8; offset + 2 <= end;) {
+        const int tag = static_cast<unsigned char>(section[offset]);
+        const int length = static_cast<unsigned char>(section[offset + 1]);
+        if (offset + 2 + length > end) {
+            break;
+        }
+        std::set<int> pids;
+        std::set<int> systems;
+        readCaDescriptors(section, offset, offset + 2 + length, &pids, &systems);
+        if (tag != 0x09 || (!systems.empty() && m_caSystems.count(*systems.begin()) != 0)) {
+            kept += section.mid(offset, 2 + length);
+            emmPids.insert(pids.begin(), pids.end());
+        }
+        offset += 2 + length;
+    }
+    // Side effect: the EMM PIDs of the kept descriptors join the PID filter.
+    if (emmPids != m_emmPids) {
+        m_emmPids = emmPids;
+        selectPids();
+    }
+    QByteArray rewritten = section.left(8) + kept + QByteArray(4, char(0));
+    const int sectionLength = static_cast<int>(rewritten.size()) - 3;
+    rewritten[1] = static_cast<char>((static_cast<unsigned char>(rewritten[1]) & 0xF0) | ((sectionLength >> 8) & 0x0F));
+    rewritten[2] = static_cast<char>(sectionLength & 0xFF);
+    return SectionRewriter::Decision{SectionRewriter::Decision::Replace, rewritten};
 }
 
 void M2tsPacketizer::endTrack(const QString& reason) {
@@ -560,9 +810,13 @@ void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
     int pcrPid = -1;
     int videoPid = -1;
     std::set<int> elementaryPids;
-    if (!parsePmt(section.bytes, &pcrPid, &elementaryPids, &videoPid)) {
+    std::set<int> ecmPids;
+    std::set<int> caSystems;
+    if (!parsePmt(section.bytes, &pcrPid, &elementaryPids, &videoPid, &ecmPids, &caSystems)) {
         return;
     }
+    m_ecmPids = ecmPids;
+    m_caSystems = caSystems;
     m_pmt = section;
     m_pcrPid = pcrPid;
     m_videoPid = videoPid;
@@ -697,7 +951,17 @@ void M2tsPacketizer::selectPids() {
     for (int pid : m_elementaryPids) {
         m_selectedPids.set(pid);
     }
-    // Optional SI-table retention (msfts#7 suggestion 1): keep the well-known
+    // Draft "Per-Program": a publisher filtering a scrambled stream MUST keep
+    // the conditional access packets: the CAT, the ECMs that the PMT
+    // references, and the EMMs that the CAT references.
+    m_selectedPids.set(0x0001);
+    for (int pid : m_ecmPids) {
+        m_selectedPids.set(pid);
+    }
+    for (int pid : m_emmPids) {
+        m_selectedPids.set(pid);
+    }
+    // Optional SI-table retention (draft "Per-Program"): keep the well-known
     // DVB PSI/SI PIDs (NIT 0x10, SDT/BAT 0x11, EIT 0x12, TDT/TOT 0x14) alongside
     // the selected program.
     if (m_retainSiTables) {
@@ -780,6 +1044,17 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
                 --index;
                 continue;
             }
+            // Rewritten tables other than the PAT: their sections go out in new
+            // packets, often none, in the place of this one.
+            if (SectionRewriter* rewriter = rewriterFor(pid)) {
+                const QList<QByteArray> rewritten = rewriter->push(
+                    tsView, packet, [this, pid](const QByteArray& section) { return rewriteSection(pid, section); });
+                for (const QByteArray& out : rewritten) {
+                    payload += out;
+                }
+                index += static_cast<int>(rewritten.size()) - 1;
+                continue;
+            }
             // One rewritten PAT packet takes the place of the packet that starts
             // section 0 of each source PAT, which keeps the source repetition
             // rate. The other packets of a long source PAT go. PID 0 gets its
@@ -827,7 +1102,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
             continue;
         }
         // Use the known RAP PID if already identified from PAT/PMT or prior latch.
-        if (m_rapPid < 0) {
+        if (m_rapPid == -1) {
             m_rapPid = pid; // fallback: latch on first RAI PID seen
         }
         rapDetected = pid == m_rapPid;
@@ -837,6 +1112,18 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         // New group at this RAP boundary
         ++m_currentGroupId;
         m_nextObjectIdInGroup = 0;
+    }
+    // Draft "Group Boundaries": a Group SHOULD NOT last longer than 2 seconds.
+    // Groups follow the random access points of the source, so say once when
+    // two of them are further apart.
+    if (rapDetected && object->ptsUs.has_value()) {
+        if (m_lastGroupPtsUs.has_value() && !m_warnedLongGroup && *object->ptsUs > *m_lastGroupPtsUs + 2000000) {
+            m_warnedLongGroup = true;
+            qWarning("Random access points %.1f s apart: a Group lasts longer than the 2 s that MSFTS "
+                     "recommends. Shorten the GOP at the encoder.",
+                     static_cast<double>(*object->ptsUs - *m_lastGroupPtsUs) / 1e6);
+        }
+        m_lastGroupPtsUs = object->ptsUs;
     }
     if (rapDetected) {
         m_sawFirstRap = true;
@@ -850,6 +1137,23 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     return true;
 }
 
+QByteArray M2tsPacketizer::lookAheadPacket(qsizetype offset) {
+    // A non-seekable source keeps every packet read in the prebuffer, so
+    // readObject still publishes it. A seekable one is read in order from its
+    // current position.
+    if (!m_sequential) {
+        return m_file.read(m_packetSize);
+    }
+    while (offset + m_packetSize > m_prebuffer.size()) {
+        const QByteArray packet = m_file.read(m_packetSize);
+        if (packet.size() != m_packetSize) {
+            return {};
+        }
+        m_prebuffer += packet;
+    }
+    return m_prebuffer.mid(offset, m_packetSize);
+}
+
 bool M2tsPacketizer::findRandomAccess() {
     // Looks ahead on a live source, up to 20,000 packets (about 2 seconds at
     // 10 Mbit/s), for the first random access point. The packets read stay in
@@ -857,14 +1161,11 @@ bool M2tsPacketizer::findRandomAccess() {
     constexpr int maxPackets = 20000;
     const int savedRapPid = m_rapPid;
     for (qsizetype offset = 0; offset < qsizetype{maxPackets} * m_packetSize; offset += m_packetSize) {
-        if (offset + m_packetSize > m_prebuffer.size()) {
-            const QByteArray packet = m_file.read(m_packetSize);
-            if (packet.size() != m_packetSize) {
-                break;
-            }
-            m_prebuffer += packet;
+        const QByteArray packet = lookAheadPacket(offset);
+        if (packet.size() != m_packetSize) {
+            break;
         }
-        const QByteArray tsPacket = tsPacketView(m_prebuffer.mid(offset, m_packetSize));
+        const QByteArray tsPacket = tsPacketView(packet);
         if (startsRandomAccess(pidOf(tsPacket), tsPacket)) {
             return true;
         }
@@ -875,11 +1176,76 @@ bool M2tsPacketizer::findRandomAccess() {
     return false;
 }
 
+void M2tsPacketizer::measureMuxRate() {
+    // Counts the 188-octet packets between the first PCR and the last PCR read,
+    // over at most 20,000 packets or 1 second of PCR time, and divides by the
+    // PCR interval. A non-seekable source keeps the packets read in the
+    // prebuffer, so readObject still sees them.
+    constexpr int maxPackets = 20000;
+    constexpr std::int64_t pcrHz = 27000000;
+    constexpr std::int64_t pcrRange = (std::int64_t{1} << 33) * 300;
+    m_muxRateNote.clear();
+    if (m_pcrPid < 0) {
+        m_muxRateNote = QStringLiteral("the PMT gives no PCR PID");
+        return;
+    }
+    if (!m_sequential && !m_file.seek(0)) {
+        return;
+    }
+    std::int64_t firstPcr = -1;
+    std::int64_t lastPcr = -1;
+    std::int64_t elapsed = 0;
+    int firstIndex = 0;
+    int lastIndex = 0;
+    int nullPackets = 0;
+    for (int index = 0; index < maxPackets && elapsed < pcrHz; ++index) {
+        const QByteArray packet = lookAheadPacket(qsizetype{index} * m_packetSize);
+        if (packet.size() != m_packetSize || !packetHasSync(packet)) {
+            break;
+        }
+        const QByteArray tsPacket = tsPacketView(packet);
+        const int pid = pidOf(tsPacket);
+        nullPackets += pid == 0x1FFF ? 1 : 0;
+        const std::int64_t pcr = pid == m_pcrPid ? pcrOf(tsPacket) : -1;
+        if (pcr < 0) {
+            continue;
+        }
+        if (firstPcr < 0) {
+            firstPcr = pcr;
+            firstIndex = index;
+        } else {
+            elapsed += (pcr - lastPcr + pcrRange) % pcrRange;
+        }
+        lastPcr = pcr;
+        lastIndex = index;
+    }
+    if (!m_sequential) {
+        m_file.seek(0);
+    }
+    if (elapsed <= 0 || lastIndex <= firstIndex) {
+        m_muxRateNote = QStringLiteral("fewer than two PCRs at the start of the source");
+    } else if (nullPackets == 0) {
+        // Without null stuffing the source is likely VBR, and the measure would
+        // be an average, not a nominal rate.
+        m_muxRateNote = QStringLiteral("the source carries no null packets, so it is likely VBR");
+    } else {
+        m_measuredMuxRate = (static_cast<std::int64_t>(lastIndex - firstIndex) * 188 * 8 * pcrHz + elapsed / 2) / elapsed;
+    }
+}
+
+qint64 M2tsPacketizer::measuredMuxRate() const {
+    return m_measuredMuxRate;
+}
+
+QString M2tsPacketizer::muxRateNote() const {
+    return m_muxRateNote;
+}
+
 bool M2tsPacketizer::startsRandomAccess(int pid, const QByteArray& tsPacket) {
     if (pid <= 0x001F || pid == 0x1FFF || !hasRandomAccessIndicator(tsPacket)) {
         return false;
     }
-    if (m_rapPid < 0) {
+    if (m_rapPid == -1) {
         m_rapPid = pid;   // fallback: latch on the first PID with the indicator
     }
     return pid == m_rapPid;

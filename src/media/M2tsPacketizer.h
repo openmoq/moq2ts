@@ -7,6 +7,8 @@
 
 #include <bitset>
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <optional>
 #include <set>
 #include <utility>
@@ -65,6 +67,38 @@ private:
 // section_number of the section that starts in a 188-octet TS packet, or -1.
 int startingSectionNumber(const QByteArray& tsPacket);
 
+// Rewrites the sections of one PID in per-program carriage (draft
+// "Per-Program"). A filter decides, per section, to drop it, keep it unchanged,
+// or replace it. A replaced section gets its own version_number, which changes
+// only when its content changes, and a new CRC_32. The sections go out in new
+// packets with their own continuity counter, in the place of the source packet
+// that completes each of them.
+class SectionRewriter {
+public:
+    struct Decision {
+        enum Kind { Drop, Keep, Replace };
+        Kind kind = Drop;
+        QByteArray section;   // the new section for Replace, CRC_32 included or not
+    };
+    using Filter = std::function<Decision(const QByteArray& section)>;
+
+    // Feeds one source packet (188 or 192 octets) and its 188-octet TS view.
+    // Returns the packets to publish in its place, often none.
+    QList<QByteArray> push(const QByteArray& tsPacket, const QByteArray& sourcePacket, const Filter& filter);
+
+private:
+    QByteArray versioned(QByteArray section);
+    QList<QByteArray> packets(const QByteArray& section, const QByteArray& tsPacket, const QByteArray& sourcePacket);
+
+    PsiAssembler m_assembler;
+    // (table_id, table_id_extension) -> (content without version and CRC_32, version)
+    std::map<std::pair<int, int>, std::pair<QByteArray, int>> m_versions;
+    int m_continuityCounter = 0;
+};
+
+// PCR of a 188-octet TS packet in 27 MHz units, or -1 when it carries none.
+std::int64_t pcrOf(const QByteArray& tsPacket);
+
 // PTS of a PES packet that starts in a 188-octet TS packet, in 90 kHz units.
 // Returns -1 when the packet starts no PES packet or the header carries no PTS.
 std::int64_t pesPts(const QByteArray& tsPacket);
@@ -109,6 +143,11 @@ public:
     // with the new initData. The catalog then has to carry it (draft "Use of MSF
     // Initialization Data").
     bool takeInitDataChange(QByteArray* initData);
+    // Per-program carriage of a single-program source without null packets:
+    // the source mux rate in bit/s that the PCR gives, or 0 with the reason in
+    // muxRateNote(). Valid after open().
+    qint64 measuredMuxRate() const;
+    QString muxRateNote() const;
     // True when the first Object of every Group contains a random access point,
     // which the catalog then declares as mpeg2tsRandomAccess. Valid after open().
     bool randomAccess() const;
@@ -132,6 +171,13 @@ private:
     bool selectProgramPids(QString* error);
     void selectPids();
     void refreshInitData();
+    void measureMuxRate();
+    // Per-program carriage: the rewriter of a table PID other than the PAT,
+    // or nullptr, and the decision for each of its sections.
+    SectionRewriter* rewriterFor(int pid);
+    SectionRewriter::Decision rewriteSection(int pid, const QByteArray& section);
+    SectionRewriter::Decision rewriteCat(const QByteArray& section);
+    SectionRewriter::Decision rewriteSdt(const QByteArray& section);
     // Stops the track: readObject returns false with this reason from now on.
     void endTrack(const QString& reason);
     // Per-program carriage: the PAT that lists the selected program only.
@@ -140,6 +186,8 @@ private:
     bool packetHasSync(const QByteArray& packet) const;
     QByteArray tsPacketView(const QByteArray& sourcePacket) const;
     bool hasRandomAccessIndicator(const QByteArray& tsPacket) const;
+    // The packet at offset of a look-ahead from the start of the source.
+    QByteArray lookAheadPacket(qsizetype offset);
     // Live source: whether a random access point comes within the look-ahead.
     bool findRandomAccess();
     // True for the first TS packet of a random access point on the group PID.
@@ -170,6 +218,17 @@ private:
     std::vector<std::pair<int, int>> m_patPrograms;
     int m_networkPid = -1;
     std::set<int> m_elementaryPids;
+    // Conditional access: the ECM PIDs and CA systems of the PMT, the EMM PIDs
+    // that the CAT gives for those systems, and the rewritten CAT.
+    std::set<int> m_ecmPids;
+    std::set<int> m_caSystems;
+    std::set<int> m_emmPids;
+    SectionRewriter m_catRewriter;
+    // With --retain-si: the SDT and the EIT reduced to the carried service.
+    SectionRewriter m_sdtRewriter;
+    int m_sdtServiceVersion = -1;   // last SDT version that listed the service
+    bool m_warnedSdtNoService = false;
+    SectionRewriter m_eitRewriter;
 
     // The rewritten PAT of per-program carriage.
     QByteArray m_rewrittenPat;          // the section
@@ -183,7 +242,12 @@ private:
     bool m_ended = false;
     QString m_endReason;
     bool m_initDataChanged = false;
+    qint64 m_measuredMuxRate = 0;
+    QString m_muxRateNote;
 
+    // PTS of the last Group start, and whether the 2-second warning was given.
+    std::optional<std::uint64_t> m_lastGroupPtsUs;
+    bool m_warnedLongGroup = false;
     // A live track drops the packets before its first random access point.
     bool m_dropLeadIn = false;
     bool m_leadInDropped = false;
@@ -198,6 +262,9 @@ private:
     bool m_sawFirstRap = false;
     // The PID on which we trigger group boundaries. Set to the first PID where
     // random_access_indicator is observed; in practice this is the video PID.
+    // -1: latch on the first PID with a random access indicator. kAwaitingPmt:
+    // wait for the PMT of a new reference program, and latch on nothing.
+    static constexpr int kAwaitingPmt = -2;
     int m_rapPid = -1;
 
     // Carriage-profile state (msfts#7).

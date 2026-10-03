@@ -48,12 +48,36 @@ int main() {
         ok &= expect(!track.contains("mpeg2tsSiPids"), "unmodified-program: no SI PIDs");
     }
 
-    // unmodified-multiplex selects no program: every program field is absent.
+    // unmodified-multiplex with a reference program: its number and PCR PID,
+    // and random access when declared. The mux rate and SI PIDs stay out.
     {
-        const QJsonObject track = mediaTrack(MsftsMuxer::catalogJson(baseCatalog(Mpeg2tsMode::UnmodifiedMultiplex)));
+        MsftsCatalog catalog = baseCatalog(Mpeg2tsMode::UnmodifiedMultiplex);
+        catalog.randomAccess = true;
+        const QJsonObject track = mediaTrack(MsftsMuxer::catalogJson(catalog));
         ok &= expect(track.value("mpeg2tsMode").toString() == "unmodified-multiplex", "multiplex: mode");
-        for (const char* field : {"mpeg2tsProgramNumber", "mpeg2tsPcrPid", "mpeg2tsMuxRate", "mpeg2tsSiPids"}) {
+        ok &= expect(track.value("mpeg2tsProgramNumber").toInt() == 1 && track.value("mpeg2tsPcrPid").toInt() == 256,
+                     "multiplex: reference program named");
+        ok &= expect(track.value("mpeg2tsRandomAccess").toBool(), "multiplex: random access of the reference program");
+        for (const char* field : {"mpeg2tsMuxRate", "mpeg2tsSiPids"}) {
             ok &= expect(!track.contains(QLatin1String(field)), std::string("multiplex: no ") + field);
+        }
+        MsftsCatalog parsed;
+        ok &= expect(MsftsMuxer::catalogFromJson(MsftsMuxer::catalogJson(catalog), &parsed, nullptr, nullptr) &&
+                         parsed.mode == Mpeg2tsMode::UnmodifiedMultiplex && parsed.programNumber == 1 &&
+                         parsed.pcrPid == 256,
+                     "multiplex: the parser reads the reference program");
+    }
+
+    // unmodified-multiplex without a reference program: no program fields, and
+    // no mpeg2tsRandomAccess even if the flag is set.
+    {
+        MsftsCatalog catalog = baseCatalog(Mpeg2tsMode::UnmodifiedMultiplex);
+        catalog.pcrPid = -1;
+        catalog.randomAccess = true;
+        const QJsonObject track = mediaTrack(MsftsMuxer::catalogJson(catalog));
+        for (const char* field : {"mpeg2tsProgramNumber", "mpeg2tsPcrPid", "mpeg2tsMuxRate", "mpeg2tsSiPids",
+                                  "mpeg2tsRandomAccess"}) {
+            ok &= expect(!track.contains(QLatin1String(field)), std::string("multiplex without reference: no ") + field);
         }
     }
 

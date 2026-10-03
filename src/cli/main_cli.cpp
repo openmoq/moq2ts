@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
     addValue(QStringLiteral("draft"), QStringLiteral("MOQ draft version (14 or 16)."),
              QStringLiteral("version"), QStringLiteral("16"));
     parser.addOption(QCommandLineOption(QStringLiteral("retain-si"),
-        QStringLiteral("Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT).")));
+        QStringLiteral("Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT), with the SDT and EIT reduced to the carried service.")));
     parser.addOption(QCommandLineOption(QStringLiteral("retain-null"),
         QStringLiteral("Per-program mode: also keep null (0x1FFF) packets.")));
     // SRT ingest source (alternative to --video file).
@@ -284,9 +284,6 @@ int main(int argc, char** argv) {
             }
             if (cfg.retainNullPackets) {
                 ignored << QStringLiteral("--retain-null");
-            }
-            if (parser.isSet(QStringLiteral("program"))) {
-                ignored << QStringLiteral("--program");
             }
             if (!ignored.isEmpty()) {
                 logLine(stderr, "warn",

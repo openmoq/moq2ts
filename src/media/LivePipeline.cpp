@@ -330,7 +330,7 @@ void LivePipeline::runLoop() {
         .mode = !m_config.transparentMode             ? Mpeg2tsMode::PerProgram
                 : packetizer.patProgramCount() == 1   ? Mpeg2tsMode::UnmodifiedProgram
                                                       : Mpeg2tsMode::UnmodifiedMultiplex,
-        .mpeg2tsMuxRateBps = m_config.mpeg2tsMuxRateBps,
+        .mpeg2tsMuxRateBps = m_config.mpeg2tsMuxRateBps > 0 ? m_config.mpeg2tsMuxRateBps : packetizer.measuredMuxRate(),
         .isLive = false,
         .bitrateBps = static_cast<qint64>(m_config.videoTargetBitrateKbps) * 1000,
         // generatedAt is suppressed for VOD by catalogJson (isLive false).
@@ -345,6 +345,17 @@ void LivePipeline::runLoop() {
         // it is set here rather than in the initializer above. The capture path
         // already sets it; this is the path production uses.
         catalogSpec.generatedAtMs = QDateTime::currentMSecsSinceEpoch();
+    }
+    // Draft "Mux Rate": a per-program track without null packets SHOULD
+    // declare mpeg2tsMuxRate. Say why when it cannot.
+    if (!m_config.transparentMode && !m_config.retainNullPackets && catalogSpec.mpeg2tsMuxRateBps <= 0) {
+        if (packetizer.patProgramCount() > 1) {
+            qWarning("No mpeg2tsMuxRate: for a program of a multi-program source, give --mux-rate, at least "
+                     "the peak rate of the program.");
+        } else {
+            qWarning("No mpeg2tsMuxRate: %s. Give --mux-rate to declare one.",
+                     qUtf8Printable(packetizer.muxRateNote()));
+        }
     }
     const QByteArray catalog = MsftsMuxer::catalogJson(catalogSpec);
 

@@ -45,14 +45,19 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
     mediaTrack.insert(QStringLiteral("mpeg2tsPacketSize"), catalog.packetSize);
     // mpeg2tsMode is required (draft-gregoire-moq-msfts).
     mediaTrack.insert(QStringLiteral("mpeg2tsMode"), modeName(catalog.mode));
-    // In unmodified-multiplex the publisher selects no program, so
-    // mpeg2tsProgramNumber, mpeg2tsPcrPid, mpeg2tsMuxRate, and mpeg2tsSiPids
-    // MUST be absent. The other modes describe one program.
-    if (catalog.mode != Mpeg2tsMode::UnmodifiedMultiplex) {
+    // In unmodified-multiplex the publisher MAY name a reference program, on
+    // whose PCR a subscriber paces the multiplex. The track names it only when
+    // its PCR PID is known. mpeg2tsMuxRate and mpeg2tsSiPids stay forbidden in
+    // that mode.
+    const bool multiplex = catalog.mode == Mpeg2tsMode::UnmodifiedMultiplex;
+    const bool namesProgram = !multiplex || catalog.pcrPid >= 0;
+    if (namesProgram) {
         mediaTrack.insert(QStringLiteral("mpeg2tsProgramNumber"), catalog.programNumber);
         if (catalog.pcrPid >= 0) {
             mediaTrack.insert(QStringLiteral("mpeg2tsPcrPid"), catalog.pcrPid);
         }
+    }
+    if (!multiplex) {
         // Advisory source constant mux rate.
         if (catalog.mpeg2tsMuxRateBps > 0) {
             mediaTrack.insert(QStringLiteral("mpeg2tsMuxRate"), catalog.mpeg2tsMuxRateBps);
@@ -73,8 +78,9 @@ QByteArray MsftsMuxer::catalogJson(const MsftsCatalog& catalog) {
         mediaTrack.insert(QStringLiteral("mpeg2tsTimestampMode"), catalog.timestampMode);
     }
     // Only advertised when the first Object of every Group contains a random
-    // access point.
-    if (catalog.randomAccess) {
+    // access point. On a multiplex, that means the reference program's points,
+    // so the field MUST be absent without a reference program.
+    if (catalog.randomAccess && namesProgram) {
         mediaTrack.insert(QStringLiteral("mpeg2tsRandomAccess"), true);
     }
     // MSF 5.1.37: track duration is VOD-only (MUST NOT appear when isLive true).

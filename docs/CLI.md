@@ -57,12 +57,12 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--audio <path>` | - | Alternate single-stream TS source path |
 | `--srt-config <path>` | - | SRT ingest: JSON caller config (see below). Takes the place of `--video`, and implies `--unmodified` |
 | `--camera <id>` / `--mic <id>` | - | Capture device ids (instead of a TS source) |
-| `--program <n>` | `0` | MPEG program to select (0 = first); ignored with `--unmodified` |
+| `--program <n>` | `0` | MPEG program to select (0 = first). With `--unmodified` on a multi-program source, it names the reference program |
 | `--unmodified` | off | Unmodified carriage: forward every source packet unchanged (no PID filter or rewrite, no initialization data). The track is `unmodified-program` for a single-program source and `unmodified-multiplex` otherwise |
 | `--transparent` | off | Alias of `--unmodified`, kept for existing scripts |
-| `--retain-si` | off | Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT) |
+| `--retain-si` | off | Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT). The SDT and the EIT keep the carried service only; the NIT, BAT, TDT, and TOT pass unchanged |
 | `--retain-null` | off | Per-program mode: also keep null (0x1FFF) packets |
-| `--mux-rate <bps>` | `0` | Advisory source mux rate in bits/s (0 omits the catalog hint). The draft forbids `mpeg2tsMuxRate` in `unmodified-multiplex`, so `--unmodified` and SRT ingest drop it when the source PAT lists several programs, and warn |
+| `--mux-rate <bps>` | `0` | Advisory source mux rate in bits/s. With 0, a per-program track of a single-program source without `--retain-null` measures the rate from the PCR when the source carries null packets, and a warning says when no rate is declared. The draft forbids `mpeg2tsMuxRate` in `unmodified-multiplex`, so `--unmodified` and SRT ingest drop it when the source PAT lists several programs, and warn |
 | `--fragment-ms <ms>` | `250` | Group cadence |
 | `--segment-bytes <n>` | `65536` | Target object size |
 | `--draft <n>` | `16` | MOQ draft version (14 or 16) |
@@ -126,9 +126,10 @@ whole number of TS packets and no packet straddles a datagram boundary.
 ingest side before the publisher ever sees the bytes.
 
 **SRT ingest always uses unmodified carriage.** A contribution feed is forwarded
-as received, so the per-program options (`--retain-si`, `--retain-null`,
-`--program`) do not apply and are ignored; passing them prints a warning. The
-catalog drops `--mux-rate` when the source PAT lists several programs.
+as received, so the per-program options (`--retain-si`, `--retain-null`) do
+not apply and are ignored; passing them prints a warning. `--program` names
+the reference program of a multi-program feed. The catalog drops
+`--mux-rate` when the source PAT lists several programs.
 Use a file or FIFO source if you need per-program publishing.
 
 ## Run: live feed from ffmpeg (server / near-encoder)
@@ -172,9 +173,10 @@ for a fidelity check, capture the emitted payloads and `cmp` against the source
 `"mpeg2tsMode":"unmodified-program"` when the source PAT lists one program,
 and `"mpeg2tsMode":"unmodified-multiplex"` otherwise. Neither contains
 `mpeg2tsSiPids`. An `unmodified-program` catalog carries the source PAT and
-PMT in a root `initDataList`. An `unmodified-multiplex` catalog must NOT
-contain `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, `mpeg2tsMuxRate`, or a root
-`initDataList`.
+PMT in a root `initDataList`. An `unmodified-multiplex` catalog names its
+reference program (the first of the PAT, or `--program`) in
+`mpeg2tsProgramNumber` and `mpeg2tsPcrPid` when its PMT is known, and never
+contains `mpeg2tsMuxRate` or a root `initDataList`.
 
 In per-program mode the PAT/PMT bootstrap (with the rewritten PAT) is carried the way MSF-01 defines it: the
 track gets an `initRef` string, and the bytes live in a root `initDataList` entry
@@ -183,6 +185,11 @@ track itself; catalogs in that shape are still parsed on the receive side, but a
 no longer produced.
 
 ## Notes
+
+- **Start-up look-ahead.** Before a live track starts, moq2ts may read ahead
+  in the source: up to 20,000 packets for the first random access point, and
+  up to one second of PCR time to measure the mux rate. On a live source this
+  delays the start by up to a few seconds. The packets read are published.
 
 - **Live stream = live catalog.** A non-seekable source (FIFO/stdin) is detected
   automatically and advertised as `isLive: true`; VOD duration probing is skipped

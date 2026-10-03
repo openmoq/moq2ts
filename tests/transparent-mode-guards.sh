@@ -20,7 +20,7 @@ grep -q 'bool transparentMode = false;' "$CFG" \
 # field: mpeg2tsMode).
 grep -q 'Mpeg2tsMode mode' "$HDR" \
   || fail "MsftsCatalog must carry the mpeg2tsMode value"
-grep -q 'catalog.mode != Mpeg2tsMode::UnmodifiedMultiplex' "$MUXER" \
+grep -q 'catalog.mode == Mpeg2tsMode::UnmodifiedMultiplex' "$MUXER" \
   || fail "program fields must be gated on the unmodified-multiplex mode"
 grep -q '"unmodified-multiplex"' "$MUXER" \
   || fail "catalog must emit the draft-conformant unmodified-multiplex mode"

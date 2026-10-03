@@ -129,6 +129,52 @@ int main() {
         ok &= expect(feed(&assembler, packets).size() == 1, "duplicate packet ignored");
     }
 
+    // SectionRewriter: drop, keep, and replace. A replaced section gets version
+    // 0, keeps it while the content stays, and moves to 1 when it changes. Output
+    // packets have their own continuity counter; a long section spans packets.
+    {
+        moq2ts::SectionRewriter rewriter;
+        using Decision = moq2ts::SectionRewriter::Decision;
+        const QByteArray keep = tb::pmtSection(1, 0x100, {{0x1B, 0x100}});
+        const QByteArray drop = tb::pmtSection(2, 0x100, {{0x1B, 0x100}});
+        const QByteArray replaceA = tb::pmtSection(3, 0x100, {{0x1B, 0x100}}, 7);
+        const QByteArray replaceB = tb::pmtSection(3, 0x100, {{0x1B, 0x100}, {0x0F, 0x101}}, 7);
+        int cc = 0;
+        QList<QByteArray> out;
+        const auto feed = [&](const QByteArray& section, const moq2ts::SectionRewriter::Filter& filter) {
+            for (const QByteArray& packet : tb::psiPackets(0x1000, section, cc)) {
+                out += rewriter.push(packet, packet, filter);
+                cc = (cc + 1) & 0x0F;
+            }
+        };
+        const auto byProgram = [&](const QByteArray& section) {
+            const int program = (static_cast<unsigned char>(section[3]) << 8) | static_cast<unsigned char>(section[4]);
+            if (program == 1) return Decision{Decision::Keep, {}};
+            if (program == 3) return Decision{Decision::Replace, section};
+            return Decision{};
+        };
+        feed(keep, byProgram);
+        feed(drop, byProgram);
+        feed(replaceA, byProgram);
+        feed(replaceA, byProgram);
+        feed(replaceB, byProgram);
+        feed(longPmt(), [](const QByteArray&) { return Decision{Decision::Keep, {}}; });
+        PsiAssembler check;
+        QList<QByteArray> sections;
+        for (int index = 0; index < out.size(); ++index) {
+            ok &= expect((static_cast<unsigned char>(out.at(index)[3]) & 0x0F) == (index & 0x0F), "rewriter: own CC");
+            sections += [&] { QList<QByteArray> got; for (const auto& section : check.push(out.at(index), out.at(index))) got.append(section.bytes); return got; }();
+        }
+        ok &= expect(sections.size() == 5, "rewriter: dropped section absent, others present");
+        ok &= expect(sections.value(0) == keep, "rewriter: kept section unchanged");
+        ok &= expect(sections.value(1) == tb::pmtSection(3, 0x100, {{0x1B, 0x100}}, 0) &&
+                         sections.value(2) == sections.value(1),
+                     "rewriter: replaced section gets version 0, stable on repeat");
+        ok &= expect(sections.value(3) == tb::pmtSection(3, 0x100, {{0x1B, 0x100}, {0x0F, 0x101}}, 1),
+                     "rewriter: new content moves to version 1, with a valid CRC_32");
+        ok &= expect(sections.value(4) == longPmt() && out.size() == 7, "rewriter: a long section spans three packets");
+    }
+
     // The production CRC_32 matches the builder's.
     {
         const QByteArray data("123456789");
