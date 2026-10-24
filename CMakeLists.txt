@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(moq2ts-ui
-    VERSION 1.2.0
+    VERSION 1.3.0
     DESCRIPTION "Cross-platform MOQ live publisher for H.264/AAC-Opus M2TS"
     LANGUAGES C CXX)
 
