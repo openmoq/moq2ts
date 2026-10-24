@@ -6,6 +6,12 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      windows:
+        description: Build the Windows package
+        type: boolean
+        default: false
 
 # Allow the release job to create GitHub Releases and upload assets.
 permissions:
@@ -110,6 +116,35 @@ jobs:
           mkdir -p dist
           mv "$OUTPUT" dist/
 
+      - name: Package CLI AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          QMAKE: /usr/lib/qt6/bin/qmake6
+          OUTPUT: moq2ts-cli-linux-x86_64.AppImage
+        run: |
+          set -eux
+          mkdir -p cli-appdir/usr/share/applications \
+                   cli-appdir/usr/share/icons/hicolor/256x256/apps
+          cat > cli-appdir/usr/share/applications/moq2ts-cli.desktop <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=moq2ts CLI
+          Exec=moq2ts-cli
+          Icon=moq2ts-cli
+          Categories=AudioVideo;
+          Terminal=true
+          EOF
+          convert -size 256x256 xc:'#1565c0' \
+            cli-appdir/usr/share/icons/hicolor/256x256/apps/moq2ts-cli.png
+          ./linuxdeploy-x86_64.AppImage --appdir cli-appdir --plugin qt \
+            --executable build/moq2ts-cli \
+            --desktop-file cli-appdir/usr/share/applications/moq2ts-cli.desktop \
+            --output appimage
+          mv "$OUTPUT" dist/
+          # The packaged CLI starts and prints its options.
+          chmod +x "dist/$OUTPUT"
+          "./dist/$OUTPUT" --help | grep -q -- --endpoint
+
       - uses: actions/upload-artifact@v5
         with:
           name: moq2ts-linux
@@ -158,7 +193,12 @@ jobs:
         run: |
           set -eux
           APP="build/moq2ts-publisher.app"
-          "$(brew --prefix qt)/bin/macdeployqt" "$APP" -verbose=1
+          # moq2ts-cli goes into the bundle so macdeployqt fixes up its Qt and
+          # library paths too; run it as moq2ts-publisher.app/Contents/MacOS/moq2ts-cli.
+          cp build/moq2ts-cli "$APP/Contents/MacOS/"
+          "$(brew --prefix qt)/bin/macdeployqt" "$APP" -verbose=1 \
+            -executable="$APP/Contents/MacOS/moq2ts-cli"
+          "$APP/Contents/MacOS/moq2ts-cli" --help | grep -q -- --endpoint
           mkdir -p dist
           ditto -c -k --keepParent "$APP" dist/moq2ts-publisher-macos.zip
 
@@ -170,6 +210,9 @@ jobs:
 
   windows:
     name: windows (x86_64)
+    # Off by default: run it from a manual dispatch with "windows" set, or set
+    # the repository variable BUILD_WINDOWS to "true" to build it on every run.
+    if: ${{ inputs.windows || vars.BUILD_WINDOWS == 'true' }}
     # The image moqxr releases its SDK on: its static libraries call MSVC STL
     # helpers that an older toolset cannot link.
     runs-on: windows-latest
@@ -230,6 +273,7 @@ jobs:
           $stage = "dist\moq2ts-publisher"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item build\Release\moq2ts-publisher.exe $stage\
+          Copy-Item build\Release\moq2ts-cli.exe $stage\
           # Bundle the Qt runtime/plugins.
           & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --release --no-translations --compiler-runtime "$stage\moq2ts-publisher.exe"
           # Bundle the vcpkg codec DLLs (ffmpeg/openh264/opus and their deps).
@@ -249,7 +293,11 @@ jobs:
     name: release
     needs: [linux, macos, windows]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Windows is optional (see its job): a skipped Windows build still releases.
+    if: >-
+      ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v')
+      && needs.linux.result == 'success' && needs.macos.result == 'success'
+      && contains(fromJSON('["success","skipped"]'), needs.windows.result) }}
     steps:
       - uses: actions/download-artifact@v5
         with:

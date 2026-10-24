@@ -30,10 +30,16 @@ GitHub Actions builds Linux, macOS, and Windows packages on every push and pull
 request (see the [Build workflow](.github/workflows/build.yml)):
 
 - **Linux** — `moq2ts-publisher-linux-x86_64.AppImage` (self-contained; `chmod +x`
-  and run)
-- **macOS** — `moq2ts-publisher-macos.zip` (a bundled `.app`)
-- **Windows** — `moq2ts-publisher-windows.zip` (the `.exe` with its Qt and codec
-  DLLs)
+  and run) and `moq2ts-cli-linux-x86_64.AppImage`, the command-line publisher
+- **macOS** — `moq2ts-publisher-macos.zip` (a bundled `.app`; the command-line
+  publisher is `moq2ts-publisher.app/Contents/MacOS/moq2ts-cli`)
+- **Windows** — `moq2ts-publisher-windows.zip` (the `.exe` and `moq2ts-cli.exe`
+  with their Qt and codec DLLs). The Windows build is off by default: start the
+  workflow by hand with `windows` set, or set the repository variable
+  `BUILD_WINDOWS` to `true`. A release without it has no Windows asset.
+
+The receiver (`moq2ts-receiver`) is not packaged: it needs an installed moq5,
+which has no prebuilt SDK yet (see [docs/CLI.md](docs/CLI.md#receive-mpeg-ts-from-a-relay)).
 
 Per-commit packages are attached to each run on the Actions tab. Tagged releases
 (`v*`) additionally publish these assets to a GitHub Release.
