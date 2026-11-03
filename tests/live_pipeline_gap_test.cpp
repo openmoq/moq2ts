@@ -5,6 +5,7 @@
 #include "ts_test_builder.h"
 
 #include <QJsonArray>
+#include <QStringList>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTemporaryDir>
@@ -222,8 +223,20 @@ int roundOf(const QByteArray& packet) {
 }
 }  // namespace
 
+// The warnings of the run, kept to check what they name.
+std::mutex g_warningMutex;
+QStringList g_warnings;
+
+void captureWarning(QtMsgType type, const QMessageLogContext&, const QString& message) {
+    if (type == QtWarningMsg) {
+        std::lock_guard<std::mutex> lock(g_warningMutex);
+        g_warnings.append(message);
+    }
+}
+
 int main() {
     std::signal(SIGPIPE, SIG_IGN);
+    qInstallMessageHandler(captureWarning);
     bool ok = true;
     QTemporaryDir dir;
 
@@ -249,6 +262,10 @@ int main() {
                 ::close(fd);
             }
         });
+        {
+            std::lock_guard<std::mutex> lock(g_warningMutex);
+            g_warnings.clear();
+        }
         auto gaps = std::make_shared<moq2ts::SourceGapLog>();
         TestPublisher publisher;
         if (beforeFirst) {
@@ -311,6 +328,15 @@ int main() {
             }
         }
         ok &= expect(groupStarts > 1, label + "several Groups");
+        // The skip-ahead warning names the track, as for a multi-program
+        // source, not the FIFO that SRT ingest writes into.
+        QStringList skipped;
+        {
+            std::lock_guard<std::mutex> lock(g_warningMutex);
+            skipped = g_warnings.filter(QStringLiteral("skipped ahead"));
+        }
+        ok &= expect(skipped.size() == 1 && skipped.front().startsWith(QStringLiteral("program-1: ")),
+                     label + "the skip-ahead warning names the track: " + skipped.join(QStringLiteral(" | ")).toStdString());
         ok &= expect(catalogTrack(publisher.catalog(), QStringLiteral("program-1"))
                          .value(QStringLiteral("mpeg2tsRandomAccess"))
                          .toBool(),

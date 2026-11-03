@@ -48,6 +48,9 @@ public slots:
     void onPublishError(const QString& message);
     void onPublishStats(int64_t packets, int64_t bytes);
     void onPublisherFramePublished(const QString& track, int64_t bytes, int64_t objects);
+    // What moqxr sent, once a publish ends without an error: replaces the
+    // pulled counts that onPublisherFramePublished showed during the run.
+    void onPublisherSentTotals(int64_t objects, int64_t bytes);
 
 private slots:
     void handleStart();

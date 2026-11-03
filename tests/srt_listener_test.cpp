@@ -9,6 +9,7 @@
 #include <QString>
 
 #include <atomic>
+#include <mutex>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -17,6 +18,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <syslog.h>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -35,6 +38,24 @@ constexpr uint16_t kPort = 19873;
 // 5 TS packets per SRT payload. Some loopback setups silently drop UDP
 // datagrams of 1.3 kB and more, which the usual 1316-byte payload would hit.
 constexpr int kPayloadBytes = 5 * static_cast<int>(kPkt);
+
+// What libsrt logs, at warning level and above.
+std::mutex g_srtLogMutex;
+std::vector<std::string> g_srtLog;
+
+void captureSrtLog(void*, int, const char*, int, const char*, const char* message) {
+    std::lock_guard<std::mutex> lock(g_srtLogMutex);
+    g_srtLog.emplace_back(message);
+}
+
+int srtLogCount(const std::string& needle) {
+    std::lock_guard<std::mutex> lock(g_srtLogMutex);
+    int count = 0;
+    for (const std::string& line : g_srtLog) {
+        count += line.find(needle) != std::string::npos ? 1 : 0;
+    }
+    return count;
+}
 
 bool expect(bool cond, const std::string& msg) {
     if (!cond) {
@@ -137,6 +158,11 @@ int main() {
         return 1;
     }
 
+    // Back to warnings, after listen() set libsrt's level: the check below
+    // is on how the receive loop reads, not on what the level hides.
+    srt_setloghandler(nullptr, captureSrtLog);
+    srt_setloglevel(LOG_WARNING);
+
     int fds[2];
     if (!expect(::pipe(fds) == 0, "pipe")) {
         return 1;
@@ -152,6 +178,13 @@ int main() {
     SRTSOCKET first = callAndSend(0, kPacketsPerCaller);
     ok &= expect(first != SRT_INVALID_SOCK, "first caller could not connect and send");
     ok &= expect(readExactly(fds[0], got, perCaller, 5000), "first caller's packets did not reach the pipe");
+    // A caller that stays connected and silent: the receive loop waits for
+    // data, and reads none that is not there (libsrt warns "nothing to read"
+    // on each such read, every receive timeout).
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    const int emptyReads = srtLogCount("nothing to read");
+    ok &= expect(emptyReads == 0, "a silent caller makes libsrt warn of " + std::to_string(emptyReads) +
+                                      " reads with nothing to read");
     if (first != SRT_INVALID_SOCK) {
         srt_close(first);
     }

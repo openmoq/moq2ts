@@ -53,6 +53,10 @@ struct PublishConfig {
     bool pacedFileSource = false;    // pace file-source publishing at media-time rate
     int draftVersion = 22;              // MOQT transport draft version
     bool insecure = false;              // skip verifying the relay certificate (--insecure)
+    // Set by the pipeline: the source is live (capture, FIFO, pipe, or SRT),
+    // so the publish waits for subscribers for as long as it runs, and a
+    // session that ends before the source does is an error.
+    bool liveSource = false;
     // Set by the pipeline to the PID whose random access points start Groups;
     // the SRT ring buffer resyncs on it after a drop. Null outside SRT ingest.
     std::shared_ptr<std::atomic<int>> resyncPid;

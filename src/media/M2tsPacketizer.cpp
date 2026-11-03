@@ -478,7 +478,7 @@ M2tsPacketizer::M2tsPacketizer(QString sourcePath)
     : M2tsPacketizer(std::make_shared<QFile>(sourcePath), sourcePath) {}
 
 M2tsPacketizer::M2tsPacketizer(std::shared_ptr<QIODevice> device, QString label)
-    : m_sourcePath(std::move(label)),
+    : m_label(std::move(label)),
       m_device(std::move(device)) {}
 
 void M2tsPacketizer::setTransparent(bool transparent) {
@@ -503,6 +503,10 @@ void M2tsPacketizer::setRetainNullPackets(bool retain) {
 
 void M2tsPacketizer::setTimedStartWindows(bool timed) {
     m_timedStartWindows = timed;
+}
+
+void M2tsPacketizer::setLabel(QString label) {
+    m_label = std::move(label);
 }
 
 void M2tsPacketizer::setSourceGaps(std::shared_ptr<SourceGapLog> gaps) {
@@ -1382,8 +1386,8 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     // the pipeline reports once. An overflow at the same offset dropped only
     // what the flush drops anyway, so it is not reported either.
     if (gapStart && m_nextObjectId > 0 && !(m_gapCauses & SourceGapLog::LiveEdge)) {
-        qWarning("The source skipped ahead (%s): Group %llu starts where it resumed%s.",
-                 gapReason(m_gapCauses).constData(), static_cast<unsigned long long>(m_currentGroupId),
+        qWarning("%s: The source skipped ahead (%s): Group %llu starts where it resumed%s.",
+                 qUtf8Printable(m_label), gapReason(m_gapCauses).constData(), static_cast<unsigned long long>(m_currentGroupId),
                  rapDetected ? "" : ", which is not a random access point of the group PID");
     }
     if (gapStart) {
@@ -1475,9 +1479,9 @@ void M2tsPacketizer::skipToFirstGap() {
         return;
     }
     const double seconds = m_measuredBitrate > 0 ? static_cast<double>(skipped) * 8 / m_measuredBitrate : 0;
-    qWarning("The source skipped ahead before the first Object (%s): %llu bytes read before the gap (about "
+    qWarning("%s: The source skipped ahead before the first Object (%s): %llu bytes read before the gap (about "
              "%.1f s) are not published, and the track starts where the source resumed.",
-             gapReason(causes).constData(), static_cast<unsigned long long>(skipped), seconds);
+             qUtf8Printable(m_label), gapReason(causes).constData(), static_cast<unsigned long long>(skipped), seconds);
 }
 
 void M2tsPacketizer::restartAfterGap(bool discontinuity) {

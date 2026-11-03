@@ -63,8 +63,11 @@ int main(int argc, char** argv) {
     QObject::connect(&pipeline, &moq2ts::LivePipeline::status, &window, &moq2ts::MainWindow::onPublishStatus);
     QObject::connect(&pipeline, &moq2ts::LivePipeline::error, &window, &moq2ts::MainWindow::onPublishError);
     QObject::connect(&pipeline, &moq2ts::LivePipeline::stats, &window, &moq2ts::MainWindow::onPublishStats);
+    // The pulled counts during the run, then what moqxr sent at its end.
     QObject::connect(&publisher, &moq2ts::MoqxrPublisher::framePublished,
                      &window, &moq2ts::MainWindow::onPublisherFramePublished);
+    QObject::connect(&publisher, &moq2ts::MoqxrPublisher::sentTotals,
+                     &window, &moq2ts::MainWindow::onPublisherSentTotals);
     QObject::connect(&pipeline, &moq2ts::LivePipeline::previewVideoFrame, window.previewPanelWidget(), &moq2ts::PreviewPanel::handleVideoFrame);
     QObject::connect(&pipeline, &moq2ts::LivePipeline::previewAudioLevels, window.previewPanelWidget(), &moq2ts::PreviewPanel::handleAudioLevels);
     QObject::connect(&publisher, &moq2ts::MoqxrPublisher::connectionStateChanged, &window,

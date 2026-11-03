@@ -93,6 +93,19 @@ std::optional<openmoq::publisher::DraftVersion> toDraftVersion(int draft) {
     }
 }
 
+// PublisherConfig::await_subscriber_indefinitely is newer than moqxr v0.4.10:
+// set it only when the moqxr built against has it. A template, so that the
+// discarded branch is not checked against a Config without the field.
+template <typename Config>
+constexpr bool kHasAwaitSubscriberIndefinitely = requires(Config config) { config.await_subscriber_indefinitely; };
+
+template <typename Config>
+void setAwaitSubscriberIndefinitely(Config& config, bool enabled) {
+    if constexpr (kHasAwaitSubscriberIndefinitely<Config>) {
+        config.await_subscriber_indefinitely = enabled;
+    }
+}
+
 #endif
 
 } // namespace
@@ -179,7 +192,8 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
         publisherConfig.publish_catalog = false;
         publisherConfig.paced = false;
         publisherConfig.loop = false;
-        publisherConfig.subscriber_timeout = std::chrono::seconds(120);
+        publisherConfig.subscriber_timeout = subscriberTimeout(cfg.liveSource);
+        setAwaitSubscriberIndefinitely(publisherConfig, cfg.liveSource);
 
         openmoq::publisher::LiveObjectSource source;
         source.tracks.push_back({.track_name = kCatalogTrackName});
@@ -189,6 +203,9 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
         }
 
         bool catalogSent = false;
+        // Set once the source has no more Objects: the publish then ends as
+        // moq2ts asked.
+        auto sourceEnded = std::make_shared<std::atomic<bool>>(false);
         int64_t publisherObjects = 0;
         int64_t publisherBytes = 0;
         // final_in_subgroup must mark the last object of a group ON ITS OWN
@@ -203,7 +220,8 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                               publisherObjects,
                               publisherBytes,
                               catalog,
-                              lookahead]() mutable -> std::optional<openmoq::publisher::LiveObject> {
+                              lookahead,
+                              sourceEnded]() mutable -> std::optional<openmoq::publisher::LiveObject> {
             if (!catalogSent) {
                 catalogSent = true;
                 ++publisherObjects;
@@ -224,6 +242,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
 
             std::optional<ReadyObject> ready = lookahead->next();
             if (!ready.has_value()) {
+                sourceEnded->store(true, std::memory_order_release);
                 return std::nullopt;
             }
             const PublishedObject& current = ready->object;
@@ -258,7 +277,15 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
         openmoq::publisher::transport::TlsConfig tls;
         tls.insecure_skip_verify = cfg.insecure;
         const auto status = activePublisher->publish_live_objects(source, parseEndpoint(cfg.moqEndpoint), tls, false);
-        if (!status.ok && running.load(std::memory_order_acquire)) {
+        // A stop request: running turned false, or stop() ended the publish.
+        // The CLI stops the publisher before the pipeline on SIGINT/SIGTERM,
+        // so running can still be true here after an interrupt.
+        bool publisherStopped = false;
+        {
+            QMutexLocker locker(&m_mutex);
+            publisherStopped = !m_connected;
+        }
+        if (!status.ok && running.load(std::memory_order_acquire) && !publisherStopped) {
             emit publishError(QString::fromStdString(status.message));
             QMutexLocker locker(&m_mutex);
             if (m_activePublisher == activePublisher) {
@@ -286,7 +313,20 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
         }
 
         const auto stats = activePublisher->stats();
-        emit framePublished(mediaTrackName, static_cast<int64_t>(stats.bytes_published), static_cast<int64_t>(stats.objects_published));
+        // moqxr copies its session counts into stats() only when the publish
+        // succeeds; after a failure they are not what it sent.
+        if (status.ok) {
+            emit sentTotals(static_cast<int64_t>(stats.objects_published), static_cast<int64_t>(stats.bytes_published));
+        }
+        const QString unexpectedEnd = unexpectedEndReason(cfg.liveSource, running.load(std::memory_order_acquire),
+                                                          publisherStopped,
+                                                          sourceEnded->load(std::memory_order_acquire));
+        if (!unexpectedEnd.isEmpty()) {
+            qWarning("%s (%llu Objects sent%s%s).", qUtf8Printable(unexpectedEnd),
+                     static_cast<unsigned long long>(stats.objects_published),
+                     stats.last_error.empty() ? "" : "; last error: ", stats.last_error.c_str());
+            return false;
+        }
         return status.ok;
     } catch (const std::exception& error) {
         QMutexLocker locker(&m_mutex);
@@ -319,12 +359,13 @@ bool MoqxrPublisher::publishLiveObjectsMock(const QByteArray& catalog,
     int64_t publisherBytes = catalog.size();
     emit framePublished(QStringLiteral("catalog"), publisherBytes, publisherObjects);
 
-    // The same look-ahead as the real path, so the mock logs what it would send.
+    // The same look-ahead as the real path, so the mock logs what it would
+    // send. It sends what it pulls.
     ObjectLookahead lookahead(std::move(nextObject));
     while (running.load(std::memory_order_acquire)) {
         std::optional<ReadyObject> ready = lookahead.next();
         if (!ready.has_value()) {
-            return true;
+            break;
         }
         const PublishedObject* object = &ready->object;
         qDebug() << "MOCK MSFTS publish" << object->trackName << "group=" << object->groupId
@@ -338,6 +379,7 @@ bool MoqxrPublisher::publishLiveObjectsMock(const QByteArray& catalog,
             QThread::msleep(static_cast<unsigned long>(pacingMs));
         }
     }
+    emit sentTotals(publisherObjects, publisherBytes);
     return true;
 }
 
@@ -381,6 +423,32 @@ bool MoqxrPublisher::supportsDraft(int draft) {
 
 QString MoqxrPublisher::supportedDrafts() {
     return QStringLiteral("14, 16, 17, 18, 21 or 22");
+}
+
+bool MoqxrPublisher::awaitsSubscriberIndefinitely() {
+#ifdef MOQ2TS_HAS_MOQXR
+    return kHasAwaitSubscriberIndefinitely<openmoq::publisher::PublisherConfig>;
+#else
+    return false;
+#endif
+}
+
+std::chrono::seconds MoqxrPublisher::subscriberTimeout(bool liveSource) {
+    if (!liveSource) {
+        return std::chrono::seconds(120);
+    }
+    return awaitsSubscriberIndefinitely() ? std::chrono::seconds(30) : std::chrono::hours(24 * 365 * 10);
+}
+
+QString MoqxrPublisher::unexpectedEndReason(bool liveSource, bool running, bool publisherStopped, bool sourceEnded) {
+    if (!liveSource || !running || publisherStopped || sourceEnded) {
+        return {};
+    }
+    // moqxr gives no reason with a success: with no subscriber timeout left
+    // for a live source, its loop ends on its own when the relay ends the
+    // control stream, but other causes cannot be ruled out from here.
+    return QStringLiteral("The MOQT session ended while the live source was still running, without an error from "
+                          "moqxr (the relay may have closed the session); the publish stops");
 }
 
 } // namespace moq2ts

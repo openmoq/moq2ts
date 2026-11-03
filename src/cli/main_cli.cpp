@@ -211,15 +211,16 @@ int runConfig(QCoreApplication& app, const QString& path) {
     });
     QObject::connect(&publisher, &moq2ts::MoqxrPublisher::connectionStateChanged, &app,
                      [](bool, const QString& m) { logLine(stderr, "conn", m); });
-    // What the library sent, for the line printed at exit (written from the
-    // publish thread, hence direct).
-    auto sentObjects = std::make_shared<std::atomic<int64_t>>(0);
-    auto sentBytes = std::make_shared<std::atomic<int64_t>>(0);
+    // What the publisher pulled and what moqxr sent, for the line printed at
+    // exit (written from the publish thread, hence direct).
+    auto publishTotals = std::make_shared<moq2ts::PublishTotals>();
     QObject::connect(&publisher, &moq2ts::MoqxrPublisher::framePublished, &app,
-                     [sentObjects, sentBytes](const QString&, int64_t bytes, int64_t objects) {
-                         sentBytes->store(bytes, std::memory_order_relaxed);
-                         sentObjects->store(objects, std::memory_order_relaxed);
+                     [publishTotals](const QString&, int64_t bytes, int64_t objects) {
+                         publishTotals->recordPulled(objects, bytes);
                      },
+                     Qt::DirectConnection);
+    QObject::connect(&publisher, &moq2ts::MoqxrPublisher::sentTotals, &app,
+                     [publishTotals](int64_t objects, int64_t bytes) { publishTotals->recordSent(objects, bytes); },
                      Qt::DirectConnection);
 
     if (!publisher.connect(spec.relay)) {
@@ -255,9 +256,7 @@ int runConfig(QCoreApplication& app, const QString& path) {
 #ifdef MOQ2TS_HAS_SRT
         srtIngest.stop();
 #endif  // MOQ2TS_HAS_SRT
-        std::fprintf(stdout, "[final] sent_objects=%lld sent_bytes=%lld\n",
-                     static_cast<long long>(sentObjects->load(std::memory_order_relaxed)),
-                     static_cast<long long>(sentBytes->load(std::memory_order_relaxed)));
+        std::fprintf(stdout, "[final] %s\n", qUtf8Printable(publishTotals->finalFields()));
         std::fflush(stdout);
     });
 
@@ -585,22 +584,24 @@ int main(int argc, char** argv) {
 
     // The latest totals, kept for the line printed at exit: the periodic line below
     // is throttled and comes before the last Group goes out. The pipeline counts
-    // the media Objects it hands over; the publisher counts what the library sent
-    // (those plus the catalog and timeline Objects). Both are written from the
-    // worker threads, so these connections are direct.
+    // the media Objects it hands over; the publisher counts what it pulled and
+    // handed to moqxr (those plus the catalog and timeline Objects), and what
+    // moqxr sent. All are written from the worker threads, so these
+    // connections are direct.
     struct Totals {
         std::atomic<int64_t> objects{0};
         std::atomic<int64_t> bytes{0};
         std::atomic<int64_t> groups{0};
-        std::atomic<int64_t> sentObjects{0};
-        std::atomic<int64_t> sentBytes{0};
+        moq2ts::PublishTotals publish;
     };
     auto totals = std::make_shared<Totals>();
     QObject::connect(&publisher, &moq2ts::MoqxrPublisher::framePublished, &app,
                      [totals](const QString&, int64_t bytes, int64_t objects) {
-                         totals->sentBytes.store(bytes, std::memory_order_relaxed);
-                         totals->sentObjects.store(objects, std::memory_order_relaxed);
+                         totals->publish.recordPulled(objects, bytes);
                      },
+                     Qt::DirectConnection);
+    QObject::connect(&publisher, &moq2ts::MoqxrPublisher::sentTotals, &app,
+                     [totals](int64_t objects, int64_t bytes) { totals->publish.recordSent(objects, bytes); },
                      Qt::DirectConnection);
     QObject::connect(&pipeline, &moq2ts::LivePipeline::stats, &app,
                      [totals](int64_t objects, int64_t bytes, int64_t groups) {
@@ -662,12 +663,11 @@ int main(int argc, char** argv) {
         srtIngest.stop();
 #endif  // MOQ2TS_HAS_SRT
         pipeline.waitForStopped(); // bounded (3s) + detach fallback
-        std::fprintf(stdout, "[final] objects=%lld bytes=%lld groups=%lld sent_objects=%lld sent_bytes=%lld\n",
+        std::fprintf(stdout, "[final] objects=%lld bytes=%lld groups=%lld %s\n",
                      static_cast<long long>(totals->objects.load(std::memory_order_relaxed)),
                      static_cast<long long>(totals->bytes.load(std::memory_order_relaxed)),
                      static_cast<long long>(totals->groups.load(std::memory_order_relaxed)),
-                     static_cast<long long>(totals->sentObjects.load(std::memory_order_relaxed)),
-                     static_cast<long long>(totals->sentBytes.load(std::memory_order_relaxed)));
+                     qUtf8Printable(totals->publish.finalFields()));
         std::fflush(stdout);
     });
 

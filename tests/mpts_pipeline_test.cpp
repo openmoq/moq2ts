@@ -756,6 +756,11 @@ int main() {
                                 liveFeed(data, roundsBytes(2, 15)), {}, options);
         ok &= expect(run.finished, "gap: the pipeline ends with the source");
         ok &= expect(run.errors.isEmpty(), "gap: no error: " + joined(run.errors));
+        // Both programs warn of the gap, each naming its track.
+        const QStringList skipped = run.log.filter(QStringLiteral("skipped ahead"));
+        ok &= expect(skipped.size() == 2 && skipped.filter(QRegularExpression(QStringLiteral("^program-101: "))).size() == 1 &&
+                         skipped.filter(QRegularExpression(QStringLiteral("^program-102: "))).size() == 1,
+                     "gap: each program's warning names its track: " + joined(skipped));
         for (int i = 0; i < 2; ++i) {
             const QString track = QStringLiteral("program-%1").arg(101 + i);
             const std::string label = "gap: " + track.toStdString() + ": ";

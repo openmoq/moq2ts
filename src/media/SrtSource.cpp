@@ -17,6 +17,7 @@
 #include <netdb.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <syslog.h>
 #include <unistd.h>
 
 namespace moq2ts {
@@ -30,6 +31,10 @@ bool& srtInitialized() {
 void ensureSrtInit() {
     if (!srtInitialized()) {
         srt_startup();
+        // libsrt logs warnings (LOG_NOTICE by default) on stderr, from its own
+        // threads. Errors only: moq2ts reports what matters from the return
+        // codes and statistics.
+        srt_setloglevel(LOG_ERR);
         srtInitialized() = true;
     }
 }
@@ -242,8 +247,39 @@ void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequest
         }
     };
 
+    // Read only when the socket has data (or an error) to report. A blocking
+    // srt_recv() that hits SRTO_RCVTIMEO on a silent peer makes libsrt 1.5
+    // read its empty buffer and warn "nothing to read" on every timeout. The
+    // wait is bounded so the stop flag and the pipe are checked as before.
+    constexpr int kRecvPollMs = 200;
+    const int eid = srt_epoll_create();
+    if (eid < 0) {
+        qWarning() << "[SRT] epoll_create failed:" << srt_getlasterror_str();
+        return;
+    }
+    struct EpollRelease {
+        int eid;
+        ~EpollRelease() { srt_epoll_release(eid); }
+    } epollRelease{eid};
+    const int events = SRT_EPOLL_IN | SRT_EPOLL_ERR;
+    if (srt_epoll_add_usock(eid, sock, &events) == SRT_ERROR) {
+        qWarning() << "[SRT] Cannot wait for data on the socket:" << srt_getlasterror_str();
+        return;
+    }
+
     while (!stopRequested.load(std::memory_order_acquire)) {
         drainToPipe();
+
+        SRTSOCKET ready[1];
+        int readyCount = 1;
+        if (srt_epoll_wait(eid, ready, &readyCount, nullptr, nullptr, kRecvPollMs, nullptr, nullptr, nullptr,
+                           nullptr) == SRT_ERROR) {
+            if (srt_getlasterror(nullptr) == SRT_ETIMEOUT) {
+                continue;  // no data yet: check the stop flag and the pipe
+            }
+            qWarning() << "[SRT] Waiting for data failed:" << srt_getlasterror_str();
+            break;
+        }
 
         int received = srt_recv(sock, buf, kBufSize);
         if (received == SRT_ERROR) {

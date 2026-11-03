@@ -9,8 +9,18 @@ fail() { printf '%s\n' "$1" >&2; exit 1; }
 
 # The periodic [stats] line is throttled and comes before the last Group goes
 # out, so the CLI prints the totals once more at exit.
-grep -q '\[final\] objects=%lld bytes=%lld groups=%lld sent_objects=%lld sent_bytes=%lld' "$CLI" \
+grep -q '\[final\] objects=%lld bytes=%lld groups=%lld %s' "$CLI" \
   || fail "the CLI must print a [final] totals line at exit"
+grep -q '\[final\] %s' "$CLI" \
+  || fail "the --config path must print a [final] totals line at exit"
+
+# What the publisher pulled and what moqxr sent are two counts: the sent
+# counts come from moqxr only, never from the pulled ones.
+[ "$(grep -c 'finalFields()' "$CLI")" -ge 2 ] \
+  || fail "both [final] lines must print pulled_* and sent_* (PublishTotals::finalFields)"
+grep -q 'sentTotals' "$CLI" \
+  || fail "the sent counts must come from MoqxrPublisher::sentTotals"
+
 
 # The totals are written from the worker threads: the recorders connect directly.
 grep -q 'Qt::DirectConnection' "$CLI" \

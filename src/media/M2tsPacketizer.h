@@ -160,6 +160,9 @@ public:
     // In per-program carriage, that Group starts at the next random access
     // point, and its first PCR has discontinuity_indicator set.
     void setSourceGaps(std::shared_ptr<SourceGapLog> gaps);
+    // Names the track in later log lines, once the caller knows its name
+    // (the label given at construction until then).
+    void setLabel(QString label);
 
     bool open(int requestedProgramNumber, QString* error);
     bool readObject(int packetsPerObject, M2tsObject* object, QString* error);
@@ -258,7 +261,9 @@ private:
     // True for the first TS packet of a random access point on the group PID.
     bool startsRandomAccess(int pid, const QByteArray& tsPacket);
 
-    QString m_sourcePath;
+    // Names the track in the log lines that several tracks share (the
+    // source path when the caller gives no other name).
+    QString m_label;
     std::shared_ptr<QIODevice> m_device;
     int m_packetSize = 0;
     int m_requestedProgramNumber = 0;

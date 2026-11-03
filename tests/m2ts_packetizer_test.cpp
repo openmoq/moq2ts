@@ -945,7 +945,20 @@ int main() {
         warnings().clear();
         run("gap-caller.fifo", false, gapOffset, SourceGapLog::SrtNewCaller);
         const QStringList callerWarnings = warnings();
+        warnings().clear();
+        run("gap-first-named.fifo", true, gapOffset);
+        const QStringList firstWarnings = warnings();
         qInstallMessageHandler(nullptr);
+        // Several programs share one log: the warning names the track (the
+        // packetizer's label, here its source path), as the start-up lines do.
+        ok &= expect(srtWarnings.filter("skipped ahead").size() == 1 &&
+                         srtWarnings.filter("skipped ahead").front().startsWith(dir.filePath("gap-srt.fifo") + ": "),
+                     "gap warning: names the track: " + srtWarnings.join(" | ").toStdString());
+        ok &= expect(firstWarnings.filter("skipped ahead").size() == 1 &&
+                         firstWarnings.filter("skipped ahead").front().startsWith(dir.filePath("gap-first-named.fifo") +
+                                                                                 ": "),
+                     "gap warning before the first Object: names the track: " +
+                         firstWarnings.join(" | ").toStdString());
         ok &= expect(callerWarnings.filter("new SRT caller").size() == 1 &&
                          callerWarnings.filter("receive buffer").isEmpty(),
                      "gap warning: a new SRT caller is named, not the receive buffer: " +

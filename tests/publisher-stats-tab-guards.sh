@@ -38,6 +38,14 @@ if "onPublisherFramePublished(const QString& track, int64_t bytes, int64_t objec
 if "QObject::connect(&publisher, &moq2ts::MoqxrPublisher::framePublished" not in main_cpp:
     raise SystemExit("publisher framePublished signal must be connected to the stats tab")
 
+# During the run the tab shows what the publisher pulled (framePublished);
+# at the end of a successful publish, what moqxr sent (sentTotals), as before
+# the two counts were split.
+if "onPublisherSentTotals(int64_t objects, int64_t bytes)" not in window_h:
+    raise SystemExit("main window must expose a slot for moqxr's sent totals")
+if "QObject::connect(&publisher, &moq2ts::MoqxrPublisher::sentTotals" not in main_cpp:
+    raise SystemExit("publisher sentTotals signal must be connected to the stats tab")
+
 if "emit framePublished(QStringLiteral(\"catalog\")" not in publisher_cpp:
     raise SystemExit("real publisher must emit catalog stats")
 

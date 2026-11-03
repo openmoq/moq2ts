@@ -251,6 +251,8 @@ void MptsPipeline::start(const PublishConfig& relay, const MptsConfig& config, I
         m_thread.join();   // the previous run, which has ended
     }
     m_relay = relay;
+    // A FIFO, a pipe, or SRT: run() refuses a seekable file.
+    m_relay.liveSource = true;
     m_config = config;
     m_publisher = publisher;
     {

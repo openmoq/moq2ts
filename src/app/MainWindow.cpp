@@ -503,6 +503,11 @@ void MainWindow::onPublishStats(int64_t packets, int64_t bytes) {
     pipelineBytesValue->setText(formatByteCount(bytes));
 }
 
+void MainWindow::onPublisherSentTotals(int64_t objects, int64_t bytes) {
+    publisherObjectsValue->setText(QString::number(objects));
+    publisherBytesValue->setText(formatByteCount(bytes));
+}
+
 void MainWindow::onPublisherFramePublished(const QString& track, int64_t bytes, int64_t objects) {
     publisherTrackValue->setText(track);
     publisherObjectsValue->setText(QString::number(objects));

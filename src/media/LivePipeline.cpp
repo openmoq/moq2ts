@@ -275,6 +275,7 @@ void LivePipeline::runLoop() {
         };
         const QByteArray catalog = MsftsMuxer::catalogJson(catalogSpec);
 
+        m_config.liveSource = true;
         auto st = std::make_shared<PublishState>();
         st->catalog = catalogSpec;
         st->capture = capturePtr;   // keeps the source alive alongside the counters
@@ -386,10 +387,14 @@ void LivePipeline::runLoop() {
                               : packetizer.namesProgram() ? QStringLiteral("mux-1-p%1").arg(packetizer.programNumber())
                                                           : QStringLiteral("mux-1");
     const QString timelineTrackName = trackName + QStringLiteral(".timeline");
+    // The skip-ahead warnings name the track, not the FIFO that SRT ingest
+    // writes into, as for a multi-program source.
+    packetizer.setLabel(trackName);
     // A non-seekable source (FIFO / stdin / pipe) is a live feed: advertise it as
     // live and skip VOD-only duration probing, which would open and consume the
     // pipe a second time.
     const bool liveStream = packetizer.sequential();
+    m_config.liveSource = liveStream;
     const qint64 fileDurationMs = liveStream ? 0 : M2tsPacketizer::probeDurationMs(sourcePath);
     MsftsCatalog catalogSpec = packetizerCatalog(packetizer, {
         .track = trackName,
