@@ -26,7 +26,7 @@ env:
   # newer SDK. Each platform archive ships include/ + lib/ of static libraries so
   # moq2ts links the real publisher (MOQ2TS_BUILD_WITH_MOCK_MOQXR=OFF) and the
   # produced binaries can connect to a real relay. OpenSSL is a system dependency.
-  MOQXR_VERSION: v0.4.10
+  MOQXR_VERSION: v0.4.15
 
 jobs:
   linux:
