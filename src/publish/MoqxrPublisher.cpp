@@ -60,6 +60,13 @@ openmoq::publisher::transport::EndpointConfig parseEndpoint(const QString& rawEn
         throw std::runtime_error("endpoint must be host:port, moqt://host:port/path, or https://host:port/path");
     }
     endpoint.host = authority.substr(0, colon);
+    // An IPv6 literal is written [addr]:port; the resolver wants the bare address.
+    if (endpoint.host.size() >= 2 && endpoint.host.front() == '[' && endpoint.host.back() == ']') {
+        endpoint.host = endpoint.host.substr(1, endpoint.host.size() - 2);
+        if (endpoint.host.empty()) {
+            throw std::runtime_error("endpoint has an empty IPv6 address");
+        }
+    }
     const int port = std::stoi(authority.substr(colon + 1));
     if (port <= 0 || port > 65535) {
         throw std::runtime_error("endpoint port must be between 1 and 65535");
