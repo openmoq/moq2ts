@@ -341,6 +341,13 @@ int main(int argc, char** argv) {
     parser.addOption(QCommandLineOption(QStringLiteral("no-reconnect"),
         QStringLiteral("Exit when the relay connection ends. By default a live publish connects to the relay "
                        "again, with a backoff of 1 s up to 30 s, and goes on from the next Group.")));
+    addValue(QStringLiteral("accessible-window"),
+             QStringLiteral("Live sources: the window in seconds that the media timeline covers. The catalog declares it as "
+                            "accessibleWindowTime and the timeline track keeps the records inside it, so that it stops "
+                            "growing with the broadcast. 0 declares no window and keeps every record."),
+             QStringLiteral("seconds"), QStringLiteral("300"));
+    parser.addOption(QCommandLineOption(QStringLiteral("no-timeline"),
+        QStringLiteral("Publish no media timeline track (MSF makes it optional).")));
     parser.addOption(QCommandLineOption(QStringLiteral("retain-si"),
         QStringLiteral("Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT), with the SDT and EIT reduced to the carried service.")));
     addValue(QStringLiteral("si"),
@@ -407,6 +414,16 @@ int main(int argc, char** argv) {
     cfg.draftVersion = parser.value(QStringLiteral("draft")).toInt();
     cfg.insecure = parser.isSet(QStringLiteral("insecure"));
     cfg.reconnect = !parser.isSet(QStringLiteral("no-reconnect"));
+    cfg.timelineTrack = !parser.isSet(QStringLiteral("no-timeline"));
+    {
+        bool windowOk = false;
+        const double windowSeconds = parser.value(QStringLiteral("accessible-window")).toDouble(&windowOk);
+        if (!windowOk || windowSeconds < 0 || windowSeconds > 2000000.0) {
+            logLine(stderr, "error", QStringLiteral("--accessible-window must be a number of seconds from 0 to 2000000."));
+            return 2;
+        }
+        cfg.accessibleWindowMs = static_cast<int>(windowSeconds * 1000.0);
+    }
     if (!moq2ts::MoqxrPublisher::supportsDraft(cfg.draftVersion)) {
         logLine(stderr, "error", QStringLiteral("--draft %1 is not supported; use %2.")
                                      .arg(parser.value(QStringLiteral("draft")),

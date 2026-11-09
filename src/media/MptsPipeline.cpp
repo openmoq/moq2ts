@@ -336,7 +336,7 @@ void MptsPipeline::run() {
         program->config = config;
         program->device = fanOut->addOutput(kMptsOutputCapacityBytes);
         program->track = QStringLiteral("program-%1").arg(config.programNumber);
-        program->timelineTrack = program->track + QStringLiteral(".timeline");
+        program->timelineTrack = m_relay.timelineTrack ? program->track + QStringLiteral(".timeline") : QString();
         programs.push_back(std::move(program));
     }
     auto shared = std::make_shared<Shared>();
@@ -441,7 +441,8 @@ void MptsPipeline::run() {
             // there is no bitrate to declare either.
             .bitrateBps = muxRate,
             .generatedAtMs = generatedAtMs,
-        });
+            .accessibleWindowMs = m_relay.accessibleWindowMs,
+        }, m_relay.timelineTrack);
         // MSFTS 6.7: the rate SHOULD NOT be lower than the program's peak
         // rate; a receiver that pads to a lower one overflows. The average
         // measured at start-up is a lower bound of that peak.
@@ -516,9 +517,10 @@ void MptsPipeline::run() {
                 // that starts a video PES, with that PES's PTS (MSF 7.1.1). It
                 // follows the media Object it records, and goes with it when
                 // the first pull comes in between and drops it.
-                if (object.ptsUs.has_value() && program->timeline.lastGroupId != published.groupId &&
+                if (!program->timelineTrack.isEmpty() && object.ptsUs.has_value() &&
+                    program->timeline.lastGroupId != published.groupId &&
                     shared->push(index, {timelineObject(&program->timeline, program->timelineTrack, published,
-                                                        *object.ptsUs, nowUnixUs())},
+                                                        *object.ptsUs, nowUnixUs(), m_relay.accessibleWindowMs)},
                                  nullptr, object.sourceOffset, false) == Shared::Pushed::Stopped) {
                     break;
                 }
@@ -549,7 +551,9 @@ void MptsPipeline::run() {
         if (program != programs.front()) {
             sideTracks.append(program->track);
         }
-        sideTracks.append(program->timelineTrack);
+        if (!program->timelineTrack.isEmpty()) {
+            sideTracks.append(program->timelineTrack);
+        }
     }
     // The first pull starts every track at the live edge, then says so.
     auto nextObject = [this, shared, first = true]() mutable {

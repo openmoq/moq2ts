@@ -102,16 +102,30 @@ PublishedObject timelineObject(TimelineHistory* history,
                                const QString& timelineTrackName,
                                const PublishedObject& media,
                                std::uint64_t mediaTimeUs,
-                               std::uint64_t wallClockUnixUs) {
-    if (!history->records.isEmpty()) {
-        history->records += ',';
-    }
-    history->records += MsftsMuxer::mediaTimelineRecord(mediaTimeUs, media.groupId, media.objectId, wallClockUnixUs);
+                               std::uint64_t wallClockUnixUs,
+                               std::int64_t windowMs) {
+    TimelineHistory::Record record;
+    record.timeMs = static_cast<std::int64_t>((wallClockUnixUs > 0 ? wallClockUnixUs : mediaTimeUs) / 1000ULL);
+    record.json = MsftsMuxer::mediaTimelineRecord(mediaTimeUs, media.groupId, media.objectId, wallClockUnixUs);
+    history->records.push_back(std::move(record));
     history->lastGroupId = media.groupId;
+    if (windowMs > 0) {
+        const std::int64_t newest = history->records.back().timeMs;
+        while (history->records.size() > 1 && history->records.front().timeMs < newest - windowMs) {
+            history->records.pop_front();
+        }
+    }
+    QByteArray records;
+    for (const TimelineHistory::Record& kept : history->records) {
+        if (!records.isEmpty()) {
+            records += ',';
+        }
+        records += kept.json;
+    }
 
     PublishedObject timeline;
     timeline.trackName = timelineTrackName;
-    timeline.payload = '[' + history->records + ']';
+    timeline.payload = '[' + records + ']';
     timeline.groupId = media.groupId;
     timeline.objectId = 0;
     timeline.finalInGroup = true;
@@ -121,7 +135,7 @@ PublishedObject timelineObject(TimelineHistory* history,
     return timeline;
 }
 
-MsftsCatalog packetizerCatalog(const M2tsPacketizer& packetizer, MsftsCatalog entry) {
+MsftsCatalog packetizerCatalog(const M2tsPacketizer& packetizer, MsftsCatalog entry, bool withTimeline) {
     entry.packetSize = packetizer.packetSize();
     entry.programNumber = packetizer.programNumber();
     // A multiplex names a reference program only when --program gives one;
@@ -135,7 +149,7 @@ MsftsCatalog packetizerCatalog(const M2tsPacketizer& packetizer, MsftsCatalog en
     // specified semantics ("opaque", draft-gregoire-moq-msfts); omitted for 188.
     entry.timestampMode = packetizer.packetSize() == 192 ? QStringLiteral("opaque") : QString();
     entry.initData = packetizer.initData();
-    entry.timelineTrack = entry.track + QStringLiteral(".timeline");
+    entry.timelineTrack = withTimeline ? entry.track + QStringLiteral(".timeline") : QString();
     entry.randomAccess = packetizer.randomAccess();
     // MSF 5.2.6: the role is the content of the track. A multiplex has no single
     // role; a program whose PMT lists no video stream is audio.
@@ -266,7 +280,7 @@ void LivePipeline::runLoop() {
         const int packetsPerObject = std::max(1, m_config.targetSegmentBytes / capture.packetSize());
         // Track name defaults to "program-1" when not supplied by other means.
         const QString trackName = QStringLiteral("program-1");
-        const QString timelineTrackName = trackName + QStringLiteral(".timeline");
+        const QString timelineTrackName = m_config.timelineTrack ? trackName + QStringLiteral(".timeline") : QString();
         const MsftsCatalog catalogSpec{
             .track = trackName,
             .packetSize = capture.packetSize(),
@@ -279,6 +293,7 @@ void LivePipeline::runLoop() {
             .isLive = true,
             .bitrateBps = static_cast<qint64>(m_config.videoTargetBitrateKbps) * 1000,
             .generatedAtMs = QDateTime::currentMSecsSinceEpoch(),
+            .accessibleWindowMs = m_config.accessibleWindowMs,
         };
         const QByteArray catalog = MsftsMuxer::catalogJson(catalogSpec);
 
@@ -322,9 +337,9 @@ void LivePipeline::runLoop() {
             published.mediaDurationUs = static_cast<std::uint64_t>(m_config.fragmentDurationMs) * 1000ULL;
             // One timeline record per media Group, for its first Object that
             // starts a video PES, with that PES's PTS (MSF 7.1.1).
-            if (object.ptsUs.has_value() && st->timeline.lastGroupId != published.groupId) {
+            if (!timelineTrackName.isEmpty() && object.ptsUs.has_value() && st->timeline.lastGroupId != published.groupId) {
                 st->pending.push_back(timelineObject(&st->timeline, timelineTrackName, published,
-                                                     *object.ptsUs, nowUnixUs()));
+                                                     *object.ptsUs, nowUnixUs(), m_config.accessibleWindowMs));
             }
             ++st->objects;
             st->bytes += published.payload.size();
@@ -349,7 +364,7 @@ void LivePipeline::runLoop() {
             return published;
         };
 
-        if (!m_publisher->publishLiveObjects(m_config, trackName, QStringList{timelineTrackName}, catalog, std::move(nextObject), m_running)) {
+        if (!m_publisher->publishLiveObjects(m_config, trackName, timelineTrackName.isEmpty() ? QStringList() : QStringList{timelineTrackName}, catalog, std::move(nextObject), m_running)) {
             if (m_running.load(std::memory_order_acquire)) {
                 emit error(QStringLiteral("Failed to publish captured MSFTS live object stream."));
             }
@@ -401,7 +416,7 @@ void LivePipeline::runLoop() {
         const QString trackName = !multiplex                ? QStringLiteral("program-%1").arg(generation)
                                   : packetizer.namesProgram() ? QStringLiteral("mux-%1-p%2").arg(generation).arg(packetizer.programNumber())
                                                               : QStringLiteral("mux-%1").arg(generation);
-        const QString timelineTrackName = trackName + QStringLiteral(".timeline");
+        const QString timelineTrackName = m_config.timelineTrack ? trackName + QStringLiteral(".timeline") : QString();
         // The skip-ahead warnings name the track, not the FIFO that SRT ingest
         // writes into, as for a multi-program source.
         packetizer.setLabel(trackName);
@@ -420,7 +435,7 @@ void LivePipeline::runLoop() {
             .isLive = false,
             .bitrateBps = trackMaxBitrate(packetizer, m_config),
             // generatedAt is suppressed for VOD by catalogJson (isLive false).
-        });
+        }, m_config.timelineTrack);
         if (liveStream) {
             // Live pipe feed: mark the track live (VOD duration does not apply).
             catalogSpec.isLive = true;
@@ -431,6 +446,8 @@ void LivePipeline::runLoop() {
             // it is set here rather than in the initializer above. The capture path
             // already sets it; this is the path production uses.
             catalogSpec.generatedAtMs = QDateTime::currentMSecsSinceEpoch();
+            // The timeline of a live track keeps the records of this window.
+            catalogSpec.accessibleWindowMs = m_config.accessibleWindowMs;
         }
         // Draft "Mux Rate": a per-program track without null packets SHOULD
         // declare mpeg2tsMuxRate. Say why when it cannot.
@@ -519,10 +536,11 @@ void LivePipeline::runLoop() {
             // One timeline record per media Group, for its first Object that starts
             // a video PES: MSF 7.1.1 gives the record the PTS of the first media
             // sample in the Object. mediaTimeUs above stays the pacing clock.
-            if (object.ptsUs.has_value() && st->timeline.lastGroupId != published.groupId) {
+            if (!timelineTrackName.isEmpty() && object.ptsUs.has_value() && st->timeline.lastGroupId != published.groupId) {
                 // MSF 7.1.1: the wallclock time SHOULD be 0 for a VOD asset.
                 st->pending.push_back(timelineObject(&st->timeline, timelineTrackName, published,
-                                                     *object.ptsUs, liveStream ? nowUnixUs() : 0));
+                                                     *object.ptsUs, liveStream ? nowUnixUs() : 0,
+                                                     liveStream ? m_config.accessibleWindowMs : 0));
             }
             ++st->objects;
             st->bytes += published.payload.size();
@@ -563,7 +581,8 @@ void LivePipeline::runLoop() {
             return published;
         };
 
-        const bool published = m_publisher->publishLiveObjects(m_config, trackName, QStringList{timelineTrackName},
+        const bool published = m_publisher->publishLiveObjects(m_config, trackName,
+                                                               timelineTrackName.isEmpty() ? QStringList() : QStringList{timelineTrackName},
                                                                catalog, std::move(nextObject), m_running);
         if (published && st->restart && m_running.load(std::memory_order_acquire)) {
             carriedDevice = st->packetizer->device();

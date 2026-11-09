@@ -521,6 +521,12 @@ if(UNIX AND NOT APPLE)
     add_test(NAME moq2ts-live-pipeline-pat-change-tests COMMAND moq2ts-live-pipeline-pat-change-tests)
     set_tests_properties(moq2ts-live-pipeline-pat-change-tests PROPERTIES TIMEOUT 90)
 
+    # The media timeline of a live track, trimmed to the accessible window.
+    add_executable(moq2ts-timeline-window-tests tests/timeline_window_test.cpp)
+    target_include_directories(moq2ts-timeline-window-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-timeline-window-tests PRIVATE moq2ts-core)
+    add_test(NAME moq2ts-timeline-window-tests COMMAND moq2ts-timeline-window-tests)
+
     # The pipeline against the mock transport: how a live source ends.
     add_executable(moq2ts-live-pipeline-end-tests tests/live_pipeline_end_test.cpp)
     target_include_directories(moq2ts-live-pipeline-end-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

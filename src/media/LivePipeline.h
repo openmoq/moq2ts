@@ -21,7 +21,13 @@ namespace moq2ts {
 // MSF media timeline history of a track (draft-ietf-moq-msf-01 Section 7.3):
 // every record so far, comma-separated, and the last media Group recorded.
 struct TimelineHistory {
-    QByteArray records;
+    struct Record {
+        // The wallclock time in ms, or the media time when the wallclock is
+        // unknown (0): what the accessible window is measured on.
+        std::int64_t timeMs = 0;
+        QByteArray json;
+    };
+    std::deque<Record> records;
     std::optional<std::uint64_t> lastGroupId;
 };
 
@@ -62,14 +68,17 @@ struct PublishState {
 
 // Adds the record of a media Group to history and returns Object 0 of the
 // timeline Group of the same number, which holds every accessible record (MSF
-// -01 Section 7.3). The history has no bound yet (moq-wg/msf#205). The Object
-// names the media track as its afterTrack, so the publisher sends it after the
-// media Object it records.
+// -01 Section 7.3). Records older than windowMs behind the newest one are
+// dropped, as the editor's copy of MSF asks publishers to trim the timeline to
+// the accessibleWindowTime; 0 keeps every record. The Object names the media
+// track as its afterTrack, so the publisher sends it after the media Object it
+// records.
 PublishedObject timelineObject(TimelineHistory* history,
                                const QString& timelineTrackName,
                                const PublishedObject& media,
                                std::uint64_t mediaTimeUs,
-                               std::uint64_t wallClockUnixUs);
+                               std::uint64_t wallClockUnixUs,
+                               std::int64_t windowMs = 0);
 
 // The wall clock, in microseconds since the Unix epoch, for the records of a
 // live track.
@@ -80,7 +89,7 @@ std::uint64_t nowUnixUs();
 // initData, random access, and the timeline track <track>.timeline. entry
 // carries the fields that depend on the pipeline: track, packetsPerObject,
 // mode, rate, bitrate, liveness, and duration.
-MsftsCatalog packetizerCatalog(const M2tsPacketizer& packetizer, MsftsCatalog entry);
+MsftsCatalog packetizerCatalog(const M2tsPacketizer& packetizer, MsftsCatalog entry, bool withTimeline = true);
 
 class LivePipeline final : public QObject {
     Q_OBJECT
