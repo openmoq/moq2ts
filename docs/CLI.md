@@ -76,6 +76,7 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--fragment-ms <ms>` | `250` | Object media-duration hint and local mock pacing; RAPs determine media Group boundaries |
 | `--segment-bytes <n>` | `65536` | Target object size |
 | `--draft <n>` | `22` | MOQT transport draft version: 14, 16, 17, 18, 21, or 22. The relay must list it in `moqt_versions` |
+| `--no-reconnect` | off | Exit when the relay connection ends. By default a live publish (SRT, FIFO, pipe or capture source) connects to the relay again, with a backoff of 1 s doubling to 30 s, sends the latest catalog, and goes on from the next Group of every track; Group IDs keep increasing |
 | `--insecure` | off | Do not verify the relay certificate. By default it is verified against `$SSL_CERT_FILE` or the system CA bundle, so a relay with a self-signed certificate needs this flag; use it for local or test relays only |
 | `--paced` | off | File sources only: pace publishing at media rate instead of as fast as possible |
 | `--width/--height/--fps/--video-bitrate` | 1920/1080/30/2500 | Capture params |

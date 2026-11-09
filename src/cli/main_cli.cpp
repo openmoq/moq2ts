@@ -338,6 +338,9 @@ int main(int argc, char** argv) {
         QStringLiteral("Do not verify the relay certificate. For a local or test relay with a self-signed "
                        "certificate; by default the certificate is verified against $SSL_CERT_FILE or the system "
                        "CA bundle.")));
+    parser.addOption(QCommandLineOption(QStringLiteral("no-reconnect"),
+        QStringLiteral("Exit when the relay connection ends. By default a live publish connects to the relay "
+                       "again, with a backoff of 1 s up to 30 s, and goes on from the next Group.")));
     parser.addOption(QCommandLineOption(QStringLiteral("retain-si"),
         QStringLiteral("Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT), with the SDT and EIT reduced to the carried service.")));
     addValue(QStringLiteral("si"),
@@ -403,6 +406,7 @@ int main(int argc, char** argv) {
     cfg.pacedFileSource = parser.isSet(QStringLiteral("paced"));
     cfg.draftVersion = parser.value(QStringLiteral("draft")).toInt();
     cfg.insecure = parser.isSet(QStringLiteral("insecure"));
+    cfg.reconnect = !parser.isSet(QStringLiteral("no-reconnect"));
     if (!moq2ts::MoqxrPublisher::supportsDraft(cfg.draftVersion)) {
         logLine(stderr, "error", QStringLiteral("--draft %1 is not supported; use %2.")
                                      .arg(parser.value(QStringLiteral("draft")),

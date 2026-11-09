@@ -5,7 +5,10 @@
 #include <QMutexLocker>
 #include <QThread>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -103,6 +106,49 @@ std::optional<openmoq::publisher::DraftVersion> toDraftVersion(int draft) {
 // PublisherConfig::await_subscriber_indefinitely is newer than moqxr v0.4.10:
 // set it only when the moqxr built against has it. A template, so that the
 // discarded branch is not checked against a Config without the field.
+// What a live publish keeps across connections to the relay.
+struct LiveResumeState {
+    std::atomic<bool> sourceEnded{false};
+    std::atomic<int64_t> objects{0};
+    std::atomic<int64_t> bytes{0};
+    // The latest catalog, with its Group, which every connection sends first.
+    QByteArray catalog;
+    std::size_t catalogGroup = 0;
+    // The highest Group of each track that was handed to moqxr.
+    std::map<std::string, std::size_t> highestGroup;
+    // After a reconnection: Objects of these Groups and earlier are dropped.
+    std::map<std::string, std::size_t> skipUpTo;
+};
+
+constexpr std::chrono::milliseconds kReconnectBackoffMin{1000};
+constexpr std::chrono::milliseconds kReconnectBackoffMax{30000};
+
+// After a failed connection of a live publish: keeps the next connection from
+// repeating Groups, waits out the backoff, and doubles it up to 30 s (reset to
+// 1 s when the connection had carried Objects). False when a stop request ended
+// the wait.
+template <typename Stopped>
+bool prepareReconnect(LiveResumeState& state, const QString& reason, bool established,
+                      std::chrono::milliseconds& backoff, std::atomic<bool>& running, Stopped stopped) {
+    // The new connection starts every track at the Group after the last one
+    // that the lost connection began.
+    state.skipUpTo = state.highestGroup;
+    if (established) {
+        backoff = kReconnectBackoffMin;
+    }
+    qWarning("%s; connecting to the relay again in %lld ms.", qUtf8Printable(reason),
+             static_cast<long long>(backoff.count()));
+    const auto deadline = std::chrono::steady_clock::now() + backoff;
+    backoff = std::min(backoff * 2, kReconnectBackoffMax);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (stopped() || !running.load(std::memory_order_acquire)) {
+            return false;
+        }
+        QThread::msleep(100);
+    }
+    return true;
+}
+
 template <typename Config>
 constexpr bool kHasAwaitSubscriberIndefinitely = requires(Config config) { config.await_subscriber_indefinitely; };
 
@@ -202,139 +248,184 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
         publisherConfig.subscriber_timeout = subscriberTimeout(cfg.liveSource);
         setAwaitSubscriberIndefinitely(publisherConfig, cfg.liveSource);
 
-        openmoq::publisher::LiveObjectSource source;
-        source.tracks.push_back({.track_name = kCatalogTrackName});
-        source.tracks.push_back({.track_name = mediaTrackName.toStdString()});
-        for (const QString& trackName : sideTrackNames) {
-            source.tracks.push_back({.track_name = trackName.toStdString()});
-        }
-
-        bool catalogSent = false;
-        // Set once the source has no more Objects: the publish then ends as
-        // moq2ts asked.
-        auto sourceEnded = std::make_shared<std::atomic<bool>>(false);
-        int64_t publisherObjects = 0;
-        int64_t publisherBytes = 0;
-        // final_in_subgroup must mark the last object of a group ON ITS OWN
-        // TRACK, and next_object() interleaves the media, catalog and timeline
-        // tracks (and, for a multi-program source, several media tracks).
-        // ObjectLookahead holds back one object per track until the next object
-        // of that track shows whether its group ended, so a track that stalls
-        // never holds back another track's objects.
+        // What outlives one connection: the source of Objects, the totals, and
+        // the highest Group each track handed to moqxr. After a failure the
+        // publish connects again and goes on from the next Group of every
+        // track, so that Group IDs keep increasing (MOQT 2.3.1).
+        auto state = std::make_shared<LiveResumeState>();
+        state->catalog = catalog;
         auto lookahead = std::make_shared<ObjectLookahead>(std::move(nextObject));
-        source.next_object = [this,
-                              catalogSent,
-                              publisherObjects,
-                              publisherBytes,
-                              catalog,
-                              lookahead,
-                              sourceEnded]() mutable -> std::optional<openmoq::publisher::LiveObject> {
-            if (!catalogSent) {
-                catalogSent = true;
-                ++publisherObjects;
-                publisherBytes += catalog.size();
-                emit framePublished(QStringLiteral("catalog"), publisherBytes, publisherObjects);
-                return openmoq::publisher::LiveObject{
-                    .track_name = kCatalogTrackName,
-                    .group_id = 0,
-                    .subgroup_id = 0,
-                    .object_id = 0,
-                    .media_time_us = 0,
-                    .media_duration_us = 0,
-                    .payload = toVector(catalog),
-                    .subgroup_contains_group_largest = true,
-                    .final_in_subgroup = true,
-                };
-            }
-
-            std::optional<ReadyObject> ready = lookahead->next();
-            if (!ready.has_value()) {
-                sourceEnded->store(true, std::memory_order_release);
-                return std::nullopt;
-            }
-            const PublishedObject& current = ready->object;
-            ++publisherObjects;
-            publisherBytes += current.payload.size();
-            emit framePublished(current.trackName, publisherBytes, publisherObjects);
-
-            return openmoq::publisher::LiveObject{
-                .track_name = current.trackName.toStdString(),
-                .group_id = static_cast<std::size_t>(current.groupId),
-                // One subgroup per Group: see subgroup_contains_group_largest.
-                .subgroup_id = 0,
-                .object_id = static_cast<std::size_t>(current.objectId),
-                .media_time_us = current.mediaTimeUs,
-                .media_duration_us = current.mediaDurationUs,
-                .payload = toVector(current.payload),
-                // One subgroup per Group, so it holds the Group's largest
-                // Object. moqxr writes the flag into the subgroup header from
-                // the first Object, and the subgroup FIN then ends the Group.
-                .subgroup_contains_group_largest = true,
-                .final_in_subgroup = ready->finalInGroup,
-                .ends_broadcast = ready->object.endsBroadcast,
-            };
+        const bool mayReconnect = cfg.liveSource && cfg.reconnect;
+        const auto isStopped = [this] {
+            QMutexLocker locker(&m_mutex);
+            return !m_connected;
         };
+        std::chrono::milliseconds backoff = kReconnectBackoffMin;
 
-        auto activePublisher = std::make_shared<openmoq::publisher::Publisher>(publisherConfig);
-        {
-            QMutexLocker locker(&m_mutex);
-            m_activePublisher = activePublisher;
-        }
+        for (;;) {
+            openmoq::publisher::LiveObjectSource source;
+            source.tracks.push_back({.track_name = kCatalogTrackName});
+            source.tracks.push_back({.track_name = mediaTrackName.toStdString()});
+            for (const QString& trackName : sideTrackNames) {
+                source.tracks.push_back({.track_name = trackName.toStdString()});
+            }
 
-        openmoq::publisher::transport::TlsConfig tls;
-        tls.insecure_skip_verify = cfg.insecure;
-        const auto status = activePublisher->publish_live_objects(source, parseEndpoint(cfg.moqEndpoint), tls, false);
-        // A stop request: running turned false, or stop() ended the publish.
-        // The CLI stops the publisher before the pipeline on SIGINT/SIGTERM,
-        // so running can still be true here after an interrupt.
-        bool publisherStopped = false;
-        {
-            QMutexLocker locker(&m_mutex);
-            publisherStopped = !m_connected;
-        }
-        if (!status.ok && running.load(std::memory_order_acquire) && !publisherStopped) {
-            emit publishError(QString::fromStdString(status.message));
-            QMutexLocker locker(&m_mutex);
-            if (m_activePublisher == activePublisher) {
-                m_activePublisher.reset();
+            const int64_t objectsAtStart = state->objects.load(std::memory_order_acquire);
+            // The first Object of a connection is the catalog: the latest one,
+            // which a PSI change may have replaced.
+            bool catalogSent = false;
+            // final_in_subgroup must mark the last object of a group ON ITS OWN
+            // TRACK, and next_object() interleaves the media, catalog and timeline
+            // tracks (and, for a multi-program source, several media tracks).
+            // ObjectLookahead holds back one object per track until the next object
+            // of that track shows whether its group ended, so a track that stalls
+            // never holds back another track's objects.
+            source.next_object = [this, state, lookahead, catalogSent]() mutable -> std::optional<openmoq::publisher::LiveObject> {
+                if (!catalogSent) {
+                    catalogSent = true;
+                    const int64_t objects = state->objects.fetch_add(1, std::memory_order_acq_rel) + 1;
+                    const int64_t bytes = state->bytes.fetch_add(state->catalog.size(), std::memory_order_acq_rel) +
+                                          state->catalog.size();
+                    emit framePublished(QStringLiteral("catalog"), bytes, objects);
+                    return openmoq::publisher::LiveObject{
+                        .track_name = kCatalogTrackName,
+                        .group_id = state->catalogGroup,
+                        .subgroup_id = 0,
+                        .object_id = 0,
+                        .media_time_us = 0,
+                        .media_duration_us = 0,
+                        .payload = toVector(state->catalog),
+                        .subgroup_contains_group_largest = true,
+                        .final_in_subgroup = true,
+                    };
+                }
+
+                for (;;) {
+                    std::optional<ReadyObject> ready = lookahead->next();
+                    if (!ready.has_value()) {
+                        state->sourceEnded.store(true, std::memory_order_release);
+                        return std::nullopt;
+                    }
+                    const PublishedObject& current = ready->object;
+                    const std::string track = current.trackName.toStdString();
+                    const std::size_t groupId = static_cast<std::size_t>(current.groupId);
+                    // After a reconnection, what remains of the Groups that the
+                    // lost connection had started is not sent: the publish
+                    // continues with the next Group.
+                    const auto skip = state->skipUpTo.find(track);
+                    if (skip != state->skipUpTo.end() && groupId <= skip->second && !current.endsBroadcast) {
+                        continue;
+                    }
+                    std::size_t& highest = state->highestGroup[track];
+                    highest = std::max(highest, groupId);
+                    if (track == kCatalogTrackName) {
+                        // A reconnection sends this one first.
+                        state->catalog = current.payload;
+                        state->catalogGroup = groupId;
+                    }
+                    const int64_t objects = state->objects.fetch_add(1, std::memory_order_acq_rel) + 1;
+                    const int64_t bytes = state->bytes.fetch_add(current.payload.size(), std::memory_order_acq_rel) +
+                                          current.payload.size();
+                    emit framePublished(current.trackName, bytes, objects);
+
+                    return openmoq::publisher::LiveObject{
+                        .track_name = track,
+                        .group_id = groupId,
+                        // One subgroup per Group: see subgroup_contains_group_largest.
+                        .subgroup_id = 0,
+                        .object_id = static_cast<std::size_t>(current.objectId),
+                        .media_time_us = current.mediaTimeUs,
+                        .media_duration_us = current.mediaDurationUs,
+                        .payload = toVector(current.payload),
+                        // One subgroup per Group, so it holds the Group's largest
+                        // Object. moqxr writes the flag into the subgroup header from
+                        // the first Object, and the subgroup FIN then ends the Group.
+                        .subgroup_contains_group_largest = true,
+                        .final_in_subgroup = ready->finalInGroup,
+                        .ends_broadcast = ready->object.endsBroadcast,
+                    };
+                }
+            };
+
+            auto activePublisher = std::make_shared<openmoq::publisher::Publisher>(publisherConfig);
+            {
+                QMutexLocker locker(&m_mutex);
+                m_activePublisher = activePublisher;
             }
-            return false;
-        }
-        // Only one thread disconnects a Publisher. stop() takes m_activePublisher
-        // first when it interrupts a publish; the disconnect here is for the
-        // stream that ended on its own.
-        bool ownsDisconnect = false;
-        {
-            QMutexLocker locker(&m_mutex);
-            if (m_activePublisher == activePublisher) {
-                m_activePublisher.reset();
-                ownsDisconnect = true;
+
+            openmoq::publisher::transport::TlsConfig tls;
+            tls.insecure_skip_verify = cfg.insecure;
+            const auto status = activePublisher->publish_live_objects(source, parseEndpoint(cfg.moqEndpoint), tls, false);
+            // A stop request: running turned false, or stop() ended the publish.
+            // The CLI stops the publisher before the pipeline on SIGINT/SIGTERM,
+            // so running can still be true here after an interrupt.
+            bool publisherStopped = false;
+            {
+                QMutexLocker locker(&m_mutex);
+                publisherStopped = !m_connected;
             }
-        }
-        if (ownsDisconnect) {
-            const auto disconnectStatus = activePublisher->disconnect(0);
-            if (!disconnectStatus.ok) {
-                emit publishError(QString::fromStdString(disconnectStatus.message));
+            const bool sourceEnded = state->sourceEnded.load(std::memory_order_acquire);
+            const bool stillRunning = running.load(std::memory_order_acquire);
+            if (!status.ok && stillRunning && !publisherStopped) {
+                QMutexLocker locker(&m_mutex);
+                if (m_activePublisher == activePublisher) {
+                    m_activePublisher.reset();
+                }
+                locker.unlock();
+                if (!mayReconnect || sourceEnded) {
+                    emit publishError(QString::fromStdString(status.message));
+                    return false;
+                }
+                if (!prepareReconnect(*state, QString::fromStdString(status.message),
+                                      state->objects.load(std::memory_order_acquire) - objectsAtStart > 1, backoff,
+                                      running, isStopped)) {
+                    return true;   // stopped while waiting
+                }
+                continue;
+            }
+            // Only one thread disconnects a Publisher. stop() takes m_activePublisher
+            // first when it interrupts a publish; the disconnect here is for the
+            // stream that ended on its own.
+            bool ownsDisconnect = false;
+            {
+                QMutexLocker locker(&m_mutex);
+                if (m_activePublisher == activePublisher) {
+                    m_activePublisher.reset();
+                    ownsDisconnect = true;
+                }
+            }
+            if (ownsDisconnect) {
+                const auto disconnectStatus = activePublisher->disconnect(0);
+                if (!disconnectStatus.ok) {
+                    emit publishError(QString::fromStdString(disconnectStatus.message));
+                    return false;
+                }
+            }
+
+            const auto stats = activePublisher->stats();
+            // moqxr copies its session counts into stats() only when the publish
+            // succeeds; after a failure they are not what it sent.
+            if (status.ok) {
+                emit sentTotals(static_cast<int64_t>(stats.objects_published), static_cast<int64_t>(stats.bytes_published));
+            }
+            const QString unexpectedEnd = unexpectedEndReason(cfg.liveSource, stillRunning, publisherStopped, sourceEnded);
+            if (!unexpectedEnd.isEmpty()) {
+                qWarning("%s (%llu Objects sent%s%s).", qUtf8Printable(unexpectedEnd),
+                         static_cast<unsigned long long>(stats.objects_published),
+                         stats.last_error.empty() ? "" : "; last error: ", stats.last_error.c_str());
+                // The relay closed the session without an error.
+                if (mayReconnect && status.ok) {
+                    if (!prepareReconnect(*state, unexpectedEnd,
+                                          state->objects.load(std::memory_order_acquire) - objectsAtStart > 1, backoff,
+                                          running, isStopped)) {
+                        return true;   // stopped while waiting
+                    }
+                    continue;
+                }
                 return false;
             }
+            return status.ok;
         }
-
-        const auto stats = activePublisher->stats();
-        // moqxr copies its session counts into stats() only when the publish
-        // succeeds; after a failure they are not what it sent.
-        if (status.ok) {
-            emit sentTotals(static_cast<int64_t>(stats.objects_published), static_cast<int64_t>(stats.bytes_published));
-        }
-        const QString unexpectedEnd = unexpectedEndReason(cfg.liveSource, running.load(std::memory_order_acquire),
-                                                          publisherStopped,
-                                                          sourceEnded->load(std::memory_order_acquire));
-        if (!unexpectedEnd.isEmpty()) {
-            qWarning("%s (%llu Objects sent%s%s).", qUtf8Printable(unexpectedEnd),
-                     static_cast<unsigned long long>(stats.objects_published),
-                     stats.last_error.empty() ? "" : "; last error: ", stats.last_error.c_str());
-            return false;
-        }
-        return status.ok;
     } catch (const std::exception& error) {
         QMutexLocker locker(&m_mutex);
         m_activePublisher.reset();

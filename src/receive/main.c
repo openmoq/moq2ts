@@ -334,6 +334,9 @@ int main(int argc, char **argv) {
                 } else {
                     objects++;
                     bytes += obj.payload.len;
+                    if (objects == 1)
+                        fprintf(stderr, "[rx] first object group=%llu object=%llu\n",
+                                (unsigned long long)obj.group_id, (unsigned long long)obj.object_id);
                     if (groups == 0 || obj.group_id != last_group) {
                         groups++;
                         last_group = obj.group_id;
@@ -386,6 +389,9 @@ int main(int argc, char **argv) {
     }
     if (selected) readout(selected, objects, bytes, groups, &ts, &stats,
                           monotonic_seconds() - last_report, prev_bytes);
+    if (objects > 0)
+        fprintf(stderr, "[rx] last object group=%llu object=%llu\n",
+                (unsigned long long)last_group, (unsigned long long)last_object);
     if (opt.fail_on_gap && (missing_objects || duplicates || stats.gaps_reported || stats.objects_dropped ||
                             stats.parse_drops || stats.reorder_refused ||
                             ts.sync_errors || ts.malformed_packets ||
