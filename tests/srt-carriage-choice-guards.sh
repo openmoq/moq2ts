@@ -19,9 +19,11 @@ done
 grep -q 'cfg.transparentMode = true;' "$CLI" \
   || fail "SRT ingest must keep unmodified carriage by default"
 
-# The multiplex track is mux-1, or mux-1-pN when --program names a reference.
-grep -q 'QStringLiteral("mux-1")' "$PIPE" || fail "multiplex track must be named mux-1"
-grep -q 'QStringLiteral("mux-1-p%1")' "$PIPE" || fail "a named reference program must be in the track name"
+# The multiplex track is mux-N, or mux-N-pP when --program names a reference.
+# N counts the sessions (a PAT change starts a new one), so the first is mux-1.
+grep -q 'QStringLiteral("mux-%1").arg(generation)' "$PIPE" || fail "multiplex track must be named mux-<session>"
+grep -q 'QStringLiteral("mux-%1-p%2").arg(generation)' "$PIPE" || fail "a named reference program must be in the track name"
+grep -q 'for (int generation = 1;; ++generation)' "$PIPE" || fail "the first session must be number 1, so that the track is mux-1"
 grep -q 'packetizer.namesProgram() ? packetizer.pcrPid() : -1' "$PIPE" \
   || fail "the catalog must name no reference program without --program"
 
