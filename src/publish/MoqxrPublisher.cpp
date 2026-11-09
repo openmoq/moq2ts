@@ -1,5 +1,6 @@
 #include "MoqxrPublisher.h"
 #include "ObjectLookahead.h"
+#include "ReconnectBudget.h"
 
 #include <QDebug>
 #include <QMutexLocker>
@@ -149,6 +150,12 @@ bool prepareReconnect(LiveResumeState& state, const QString& reason, bool establ
     return true;
 }
 
+QString giveUpReason(const QString& reason) {
+    return QStringLiteral("%1; giving up after %2 attempts without a working connection to the relay.")
+        .arg(reason)
+        .arg(moq2ts::ReconnectBudget::kMaxFailedAttempts);
+}
+
 template <typename Config>
 constexpr bool kHasAwaitSubscriberIndefinitely = requires(Config config) { config.await_subscriber_indefinitely; };
 
@@ -261,6 +268,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
             return !m_connected;
         };
         std::chrono::milliseconds backoff = kReconnectBackoffMin;
+        ReconnectBudget retries;
 
         for (;;) {
             openmoq::publisher::LiveObjectSource source;
@@ -376,8 +384,16 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                     emit publishError(QString::fromStdString(status.message));
                     return false;
                 }
-                if (!prepareReconnect(*state, QString::fromStdString(status.message),
-                                      state->objects.load(std::memory_order_acquire) - objectsAtStart > 1, backoff,
+                using openmoq::publisher::transport::FailureKind;
+                const bool permanent = status.failure_kind == FailureKind::kFatal ||
+                                       status.failure_kind == FailureKind::kEndpointPermanent;
+                const bool established = state->objects.load(std::memory_order_acquire) - objectsAtStart > 1;
+                if (!retries.allowRetry(permanent, established)) {
+                    emit publishError(permanent ? QString::fromStdString(status.message)
+                                                : giveUpReason(QString::fromStdString(status.message)));
+                    return false;
+                }
+                if (!prepareReconnect(*state, QString::fromStdString(status.message), established, backoff,
                                       running, isStopped)) {
                     return true;   // stopped while waiting
                 }
@@ -415,9 +431,12 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                          stats.last_error.empty() ? "" : "; last error: ", stats.last_error.c_str());
                 // The relay closed the session without an error.
                 if (mayReconnect && status.ok) {
-                    if (!prepareReconnect(*state, unexpectedEnd,
-                                          state->objects.load(std::memory_order_acquire) - objectsAtStart > 1, backoff,
-                                          running, isStopped)) {
+                    const bool established = state->objects.load(std::memory_order_acquire) - objectsAtStart > 1;
+                    if (!retries.allowRetry(false, established)) {
+                        emit publishError(giveUpReason(unexpectedEnd));
+                        return false;
+                    }
+                    if (!prepareReconnect(*state, unexpectedEnd, established, backoff, running, isStopped)) {
                         return true;   // stopped while waiting
                     }
                     continue;
