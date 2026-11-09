@@ -216,10 +216,15 @@ A multi-program feed is published as one `unmodified-multiplex` track:
 | `mpeg2tsRandomAccess` | absent | absent for SRT, whose recovery fallback can resume without a random access point |
 | initialization data | the PAT and the PMT of the first program in the PAT | the PAT and the PMT of N |
 | a program leaves the PAT | the track goes on | the track ends when N leaves |
-| the PAT lists one program | the track ends | the track ends |
+| the PAT lists one program | a new session publishes an `unmodified-program` track (live source) | as without `--program` |
 
-The track ends because the draft forbids `unmodified-multiplex` for a
-one-program PAT and requires a new track for a new program number. The
+The track cannot go on because the draft forbids `unmodified-multiplex` for a
+one-program PAT and requires a new track for a new program number. moqxr cannot
+add a track to a running session, so a live source ends the session and starts
+the next with a catalog that lists the new track only (`program-N` or `mux-N`,
+N counting the sessions); subscribers subscribe again. The same applies to an
+`unmodified-program` track whose program changes its number or whose PAT gains a
+second program. A file source ends instead. The
 initialization data carries the PMT of the reference program (draft "Use of MSF
 Initialization Data"). The draft does not say which PMT a multiplex without a
 reference program carries. Without `--program`, moq2ts carries the PMT of the

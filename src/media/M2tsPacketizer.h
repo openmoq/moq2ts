@@ -195,6 +195,15 @@ public:
     // True when measuredBitrate() is also the maximum rate of the track: an
     // unmodified track of a source with null stuffing, which is constant.
     bool measuredBitrateIsConstant() const;
+    // True when the track ended because the PAT of a live source changed so that
+    // the track no longer describes it: the single program changed its number,
+    // the PAT lists a second program, or a multiplex is left with one program.
+    // MSFTS 6 then asks for a new track. The caller opens a new packetizer on
+    // device(), which reads the PSI of the source as it is now.
+    bool patRestartRequested() const;
+    // The source device. A live source is read once, so a new packetizer takes
+    // over this one, including what the device has buffered.
+    std::shared_ptr<QIODevice> device() const;
     // True when the first Object of every Group contains a random access point,
     // which the catalog then declares as mpeg2tsRandomAccess. Valid after open().
     bool randomAccess() const;
@@ -272,6 +281,7 @@ private:
     int m_programNumber = 1;
     int m_pmtPid = -1;
     int m_pcrPid = -1;
+    bool m_patRestart = false;
     int m_patProgramCount = 0;
     // First video elementary PID of the PMT; the PTS source for Object media time.
     int m_videoPid = -1;

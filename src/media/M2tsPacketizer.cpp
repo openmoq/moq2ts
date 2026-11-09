@@ -791,14 +791,18 @@ void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
     const bool listed = findPatProgram(programs, m_programNumber, &programNumber, &pmtPid);
     if (m_transparent && m_openProgramCount == 1 && (m_patProgramCount != 1 || !listed)) {
         // The catalog declares unmodified-program with this program number. A
-        // new number needs a new track (draft "Catalog"), which moq2ts cannot
-        // add during a session, and two programs make the mode false.
+        // new number needs a new track (draft "Catalog"), and two programs
+        // make the mode false. moqxr cannot add a track to a session, so a live
+        // source ends this one and the caller starts a session with the new
+        // track.
+        m_patRestart = m_sequential;
         endTrack(QStringLiteral("The source PAT no longer lists program %1 alone; the "
                                 "unmodified-program track ends.").arg(m_programNumber));
         return;
     }
     if (m_transparent && m_openProgramCount > 1 && m_patProgramCount == 1) {
         // Draft "Unmodified Multiplex": MUST NOT be used for a one-program PAT.
+        m_patRestart = m_sequential;
         endTrack(QStringLiteral("The source PAT now lists one program, so the source is no longer a "
                                 "multiplex; the unmodified-multiplex track ends."));
         return;
@@ -1707,6 +1711,14 @@ bool M2tsPacketizer::randomAccess() const {
 
 bool M2tsPacketizer::namesProgram() const {
     return !(m_transparent && m_patProgramCount > 1) || m_requestedProgramNumber != 0;
+}
+
+bool M2tsPacketizer::patRestartRequested() const {
+    return m_patRestart;
+}
+
+std::shared_ptr<QIODevice> M2tsPacketizer::device() const {
+    return m_device;
 }
 
 bool M2tsPacketizer::hasVideo() const {

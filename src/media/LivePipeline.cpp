@@ -361,201 +361,225 @@ void LivePipeline::runLoop() {
     }
 
     const QString sourcePath = !m_config.videoSource.isEmpty() ? m_config.videoSource : m_config.audioSource;
-    // Heap-allocated and shared with the nextObject lambda below, NOT a stack local.
-    // See the comment on PublishState in LivePipeline.h: the lambda outlives this
-    // frame whenever waitForStopped() has to detach the worker, so anything it
-    // touches has to outlive the frame too.
-    auto packetizerPtr = std::make_shared<M2tsPacketizer>(sourcePath);
-    M2tsPacketizer& packetizer = *packetizerPtr;
-    // MSFTS carriage-profile knobs (msfts#7); must be set before open().
-    packetizer.setTransparent(m_config.transparentMode);
-    packetizer.setSiTables(m_config.siTables);
-    packetizer.setRetainNullPackets(m_config.retainNullPackets);
-    packetizer.setSourceGaps(m_config.sourceGaps);
-    QString packetizerError;
-    if (!packetizer.open(m_config.programNumber, &packetizerError)) {
-        emit error(packetizerError);
-        m_running.store(false, std::memory_order_release);
-        return;
-    }
-
-    const int packetsPerObject = std::max(1, m_config.targetSegmentBytes / packetizer.packetSize());
-    // Unmodified carriage: unmodified-program for a one-program PAT,
-    // unmodified-multiplex otherwise. open() fails without a PAT.
-    const Mpeg2tsMode mode = !m_config.transparentMode             ? Mpeg2tsMode::PerProgram
-                             : packetizer.patProgramCount() == 1   ? Mpeg2tsMode::UnmodifiedProgram
-                                                                   : Mpeg2tsMode::UnmodifiedMultiplex;
-    const bool multiplex = mode == Mpeg2tsMode::UnmodifiedMultiplex;
-    // A multiplex is named mux-1 (draft "Unmodified Multiplex" example). With a
-    // reference program the name carries it: a declared track cannot change
-    // its program number (draft "Catalog"), so another reference needs another
-    // name.
-    const QString trackName = !multiplex                ? QStringLiteral("program-1")
-                              : packetizer.namesProgram() ? QStringLiteral("mux-1-p%1").arg(packetizer.programNumber())
-                                                          : QStringLiteral("mux-1");
-    const QString timelineTrackName = trackName + QStringLiteral(".timeline");
-    // The skip-ahead warnings name the track, not the FIFO that SRT ingest
-    // writes into, as for a multi-program source.
-    packetizer.setLabel(trackName);
-    // A non-seekable source (FIFO / stdin / pipe) is a live feed: advertise it as
-    // live and skip VOD-only duration probing, which would open and consume the
-    // pipe a second time.
-    const bool liveStream = packetizer.sequential();
-    m_config.liveSource = liveStream;
-    const qint64 fileDurationMs = liveStream ? 0 : M2tsPacketizer::probeDurationMs(sourcePath);
-    MsftsCatalog catalogSpec = packetizerCatalog(packetizer, {
-        .track = trackName,
-        .packetsPerObject = packetsPerObject,
-        .trackDurationMs = fileDurationMs,
-        .mode = mode,
-        .mpeg2tsMuxRateBps = m_config.mpeg2tsMuxRateBps > 0 ? m_config.mpeg2tsMuxRateBps : packetizer.measuredMuxRate(),
-        .isLive = false,
-        .bitrateBps = trackMaxBitrate(packetizer, m_config),
-        // generatedAt is suppressed for VOD by catalogJson (isLive false).
-    });
-    if (liveStream) {
-        // Live pipe feed: mark the track live (VOD duration does not apply).
-        catalogSpec.isLive = true;
-        // generatedAt is Optional in MSF 5.1.6 everywhere, so this is a choice rather
-        // than a requirement: it is genuinely useful on a live feed for telling one
-        // catalog instance from another, and every live example in both drafts carries
-        // it. 5.1.6 only says it SHOULD NOT appear when isLive is false, which is why
-        // it is set here rather than in the initializer above. The capture path
-        // already sets it; this is the path production uses.
-        catalogSpec.generatedAtMs = QDateTime::currentMSecsSinceEpoch();
-    }
-    // Draft "Mux Rate": a per-program track without null packets SHOULD
-    // declare mpeg2tsMuxRate. Say why when it cannot.
-    if (!m_config.transparentMode && !m_config.retainNullPackets && catalogSpec.mpeg2tsMuxRateBps <= 0) {
-        if (packetizer.patProgramCount() > 1) {
-            qWarning("No mpeg2tsMuxRate: for a program of a multi-program source, give --mux-rate, at least "
-                     "the peak rate of the program.");
-        } else {
-            qWarning("No mpeg2tsMuxRate: %s. Give --mux-rate to declare one.",
-                     qUtf8Printable(packetizer.muxRateNote()));
-        }
-    }
-    if (m_config.transparentMode && m_config.mpeg2tsMuxRateBps > 0) {
-        qWarning("--mux-rate is not declared as mpeg2tsMuxRate: MSFTS forbids the field in both "
-                 "unmodified modes. It remains a candidate for the catalog bitrate.");
-    }
-    if (multiplex) {
-        if (packetizer.namesProgram()) {
-            emit status(QStringLiteral("unmodified-multiplex track %1: reference program %2, PCR PID %3.")
-                            .arg(trackName)
-                            .arg(packetizer.programNumber())
-                            .arg(packetizer.pcrPid()));
-        } else {
-            emit status(QStringLiteral("unmodified-multiplex track %1: %2 programs, no reference program "
-                                       "(give --program to name one).")
-                            .arg(trackName)
-                            .arg(packetizer.patProgramCount()));
-        }
-        if (catalogSpec.initData.isEmpty()) {
-            qWarning("The catalog carries no initRef: the PMT that initData carries (of the program --program "
-                     "names or, without it, of the first program in the PAT) did not arrive at the start, and a "
-                     "later catalog cannot add initRef to the track.");
-        }
-    }
-    const QByteArray catalog = MsftsMuxer::catalogJson(catalogSpec);
-    if (m_config.resyncPid) {
-        m_config.resyncPid->store(packetizer.groupPid(), std::memory_order_relaxed);
-    }
-
-    constexpr std::int64_t kPaceSlackUs = 10000; // 10 ms slack    // Shared with the lambda by VALUE, so nothing it touches lives on this frame.
-    auto st = std::make_shared<PublishState>();
-    st->packetizer = packetizerPtr;
-    st->catalog = catalogSpec;
-
-    auto nextObject = [this, st, packetsPerObject, trackName, timelineTrackName, liveStream]() -> std::optional<PublishedObject> {
-        if (!m_running.load(std::memory_order_acquire)) {
-            return std::nullopt;
-        }
-        if (!st->pending.empty()) {
-            PublishedObject next = std::move(st->pending.front());
-            st->pending.pop_front();
-            return next;
+    // A live source that needs a new track (a PAT change, see M2tsPacketizer::
+    // patRestartRequested) ends the session; the next one starts here, on the
+    // same device, with a catalog that lists the new track only. The track names
+    // carry the generation, so that the new one is not the old one under another
+    // program number.
+    std::shared_ptr<QIODevice> carriedDevice;
+    for (int generation = 1;; ++generation) {
+        // Heap-allocated and shared with the nextObject lambda below, NOT a stack local.
+        // See the comment on PublishState in LivePipeline.h: the lambda outlives this
+        // frame whenever waitForStopped() has to detach the worker, so anything it
+        // touches has to outlive the frame too.
+        auto packetizerPtr = carriedDevice ? std::make_shared<M2tsPacketizer>(carriedDevice, sourcePath)
+                                           : std::make_shared<M2tsPacketizer>(sourcePath);
+        M2tsPacketizer& packetizer = *packetizerPtr;
+        // MSFTS carriage-profile knobs (msfts#7); must be set before open().
+        packetizer.setTransparent(m_config.transparentMode);
+        packetizer.setSiTables(m_config.siTables);
+        packetizer.setRetainNullPackets(m_config.retainNullPackets);
+        packetizer.setSourceGaps(m_config.sourceGaps);
+        QString packetizerError;
+        if (!packetizer.open(m_config.programNumber, &packetizerError)) {
+            emit error(packetizerError);
+            m_running.store(false, std::memory_order_release);
+            return;
         }
 
-        M2tsObject object;
-        QString readError;
-        if (!(*st->packetizer).readObject(packetsPerObject, &object, &readError)) {
-            if (!readError.isEmpty()) {
-                emit error(readError);
+        const int packetsPerObject = std::max(1, m_config.targetSegmentBytes / packetizer.packetSize());
+        // Unmodified carriage: unmodified-program for a one-program PAT,
+        // unmodified-multiplex otherwise. open() fails without a PAT.
+        const Mpeg2tsMode mode = !m_config.transparentMode             ? Mpeg2tsMode::PerProgram
+                                 : packetizer.patProgramCount() == 1   ? Mpeg2tsMode::UnmodifiedProgram
+                                                                       : Mpeg2tsMode::UnmodifiedMultiplex;
+        const bool multiplex = mode == Mpeg2tsMode::UnmodifiedMultiplex;
+        // A multiplex is named mux-1 (draft "Unmodified Multiplex" example). With a
+        // reference program the name carries it: a declared track cannot change
+        // its program number (draft "Catalog"), so another reference needs another
+        // name.
+        const QString trackName = !multiplex                ? QStringLiteral("program-%1").arg(generation)
+                                  : packetizer.namesProgram() ? QStringLiteral("mux-%1-p%2").arg(generation).arg(packetizer.programNumber())
+                                                              : QStringLiteral("mux-%1").arg(generation);
+        const QString timelineTrackName = trackName + QStringLiteral(".timeline");
+        // The skip-ahead warnings name the track, not the FIFO that SRT ingest
+        // writes into, as for a multi-program source.
+        packetizer.setLabel(trackName);
+        // A non-seekable source (FIFO / stdin / pipe) is a live feed: advertise it as
+        // live and skip VOD-only duration probing, which would open and consume the
+        // pipe a second time.
+        const bool liveStream = packetizer.sequential();
+        m_config.liveSource = liveStream;
+        const qint64 fileDurationMs = liveStream ? 0 : M2tsPacketizer::probeDurationMs(sourcePath);
+        MsftsCatalog catalogSpec = packetizerCatalog(packetizer, {
+            .track = trackName,
+            .packetsPerObject = packetsPerObject,
+            .trackDurationMs = fileDurationMs,
+            .mode = mode,
+            .mpeg2tsMuxRateBps = m_config.mpeg2tsMuxRateBps > 0 ? m_config.mpeg2tsMuxRateBps : packetizer.measuredMuxRate(),
+            .isLive = false,
+            .bitrateBps = trackMaxBitrate(packetizer, m_config),
+            // generatedAt is suppressed for VOD by catalogJson (isLive false).
+        });
+        if (liveStream) {
+            // Live pipe feed: mark the track live (VOD duration does not apply).
+            catalogSpec.isLive = true;
+            // generatedAt is Optional in MSF 5.1.6 everywhere, so this is a choice rather
+            // than a requirement: it is genuinely useful on a live feed for telling one
+            // catalog instance from another, and every live example in both drafts carries
+            // it. 5.1.6 only says it SHOULD NOT appear when isLive is false, which is why
+            // it is set here rather than in the initializer above. The capture path
+            // already sets it; this is the path production uses.
+            catalogSpec.generatedAtMs = QDateTime::currentMSecsSinceEpoch();
+        }
+        // Draft "Mux Rate": a per-program track without null packets SHOULD
+        // declare mpeg2tsMuxRate. Say why when it cannot.
+        if (!m_config.transparentMode && !m_config.retainNullPackets && catalogSpec.mpeg2tsMuxRateBps <= 0) {
+            if (packetizer.patProgramCount() > 1) {
+                qWarning("No mpeg2tsMuxRate: for a program of a multi-program source, give --mux-rate, at least "
+                         "the peak rate of the program.");
+            } else {
+                qWarning("No mpeg2tsMuxRate: %s. Give --mux-rate to declare one.",
+                         qUtf8Printable(packetizer.muxRateNote()));
+            }
+        }
+        if (m_config.transparentMode && m_config.mpeg2tsMuxRateBps > 0) {
+            qWarning("--mux-rate is not declared as mpeg2tsMuxRate: MSFTS forbids the field in both "
+                     "unmodified modes. It remains a candidate for the catalog bitrate.");
+        }
+        if (multiplex) {
+            if (packetizer.namesProgram()) {
+                emit status(QStringLiteral("unmodified-multiplex track %1: reference program %2, PCR PID %3.")
+                                .arg(trackName)
+                                .arg(packetizer.programNumber())
+                                .arg(packetizer.pcrPid()));
+            } else {
+                emit status(QStringLiteral("unmodified-multiplex track %1: %2 programs, no reference program "
+                                           "(give --program to name one).")
+                                .arg(trackName)
+                                .arg(packetizer.patProgramCount()));
+            }
+            if (catalogSpec.initData.isEmpty()) {
+                qWarning("The catalog carries no initRef: the PMT that initData carries (of the program --program "
+                         "names or, without it, of the first program in the PAT) did not arrive at the start, and a "
+                         "later catalog cannot add initRef to the track.");
+            }
+        }
+        const QByteArray catalog = MsftsMuxer::catalogJson(catalogSpec);
+        if (m_config.resyncPid) {
+            m_config.resyncPid->store(packetizer.groupPid(), std::memory_order_relaxed);
+        }
+
+        constexpr std::int64_t kPaceSlackUs = 10000; // 10 ms slack    // Shared with the lambda by VALUE, so nothing it touches lives on this frame.
+        auto st = std::make_shared<PublishState>();
+        st->packetizer = packetizerPtr;
+        st->catalog = catalogSpec;
+
+        auto nextObject = [this, st, packetsPerObject, trackName, timelineTrackName, liveStream]() -> std::optional<PublishedObject> {
+            if (!m_running.load(std::memory_order_acquire)) {
                 return std::nullopt;
             }
-            // Only a clean end of the source ends the broadcast: not an error,
-            // and not an interrupt, which closes the SRT pipe after it clears
-            // m_running.
-            return m_running.load(std::memory_order_acquire) ? endBroadcast(st.get()) : std::nullopt;
-        }
-        if (m_config.resyncPid) {
-            m_config.resyncPid->store(st->packetizer->groupPid(), std::memory_order_relaxed);
-        }
-
-        PublishedObject published;
-        published.trackName = trackName;
-        published.payload = std::move(object.payload);
-        published.groupId = object.groupId;
-        published.objectId = object.objectId;
-        published.startsGroup = object.startsGroup;
-        published.mediaTimeUs = static_cast<std::uint64_t>(st->objects) * static_cast<std::uint64_t>(m_config.fragmentDurationMs) * 1000ULL;
-        published.mediaDurationUs = static_cast<std::uint64_t>(m_config.fragmentDurationMs) * 1000ULL;
-        // One timeline record per media Group, for its first Object that starts
-        // a video PES: MSF 7.1.1 gives the record the PTS of the first media
-        // sample in the Object. mediaTimeUs above stays the pacing clock.
-        if (object.ptsUs.has_value() && st->timeline.lastGroupId != published.groupId) {
-            // MSF 7.1.1: the wallclock time SHOULD be 0 for a VOD asset.
-            st->pending.push_back(timelineObject(&st->timeline, timelineTrackName, published,
-                                                 *object.ptsUs, liveStream ? nowUnixUs() : 0));
-        }
-        ++st->objects;
-        st->bytes += published.payload.size();
-        emit stats(st->objects, st->bytes, static_cast<int64_t>(published.groupId + 1));
-
-        // Pace file-source publishing at media-time rate so data isn't dumped
-        // at wire speed before subscribers can connect.
-        if (m_config.pacedFileSource) {
-            // The release time follows the source's own clock (PCR), so a
-            // source is played out at its rate whatever the Object size. An
-            // Object without a PCR waits for the media time of the last one.
-            const std::int64_t pcrMediaUs = st->pcrClock.update(object.pcr27);
-            const bool onPcr = pcrMediaUs >= 0;
-            if (onPcr != st->pacingOnPcr) {
-                st->pacingOnPcr = onPcr;
-                st->pacingStartUs = -1;
+            if (!st->pending.empty()) {
+                PublishedObject next = std::move(st->pending.front());
+                st->pending.pop_front();
+                return next;
             }
-            const std::int64_t paceUs = onPcr ? pcrMediaUs : static_cast<std::int64_t>(published.mediaTimeUs);
-            if (st->pacingStartUs < 0) {
-                st->pacingStartUs = nowSteadyUs() - paceUs;
-            }
-            while (m_running.load(std::memory_order_acquire)) {
-                const std::int64_t delay = paceDelayUs(paceUs, nowSteadyUs() - st->pacingStartUs, kPaceSlackUs);
-                if (delay <= 0) {
-                    break;
+
+            M2tsObject object;
+            QString readError;
+            if (!(*st->packetizer).readObject(packetsPerObject, &object, &readError)) {
+                if (st->packetizer->patRestartRequested()) {
+                    // Not an error: the session ends, and the next one carries
+                    // the track that the changed PAT calls for.
+                    st->restart = true;
+                    emit status(readError);
+                    return std::nullopt;
                 }
-                std::this_thread::sleep_for(std::chrono::microseconds(std::min<std::int64_t>(delay, 5000)));
+                if (!readError.isEmpty()) {
+                    emit error(readError);
+                    return std::nullopt;
+                }
+                // Only a clean end of the source ends the broadcast: not an error,
+                // and not an interrupt, which closes the SRT pipe after it clears
+                // m_running.
+                return m_running.load(std::memory_order_acquire) ? endBroadcast(st.get()) : std::nullopt;
+            }
+            if (m_config.resyncPid) {
+                m_config.resyncPid->store(st->packetizer->groupPid(), std::memory_order_relaxed);
+            }
+
+            PublishedObject published;
+            published.trackName = trackName;
+            published.payload = std::move(object.payload);
+            published.groupId = object.groupId;
+            published.objectId = object.objectId;
+            published.startsGroup = object.startsGroup;
+            published.mediaTimeUs = static_cast<std::uint64_t>(st->objects) * static_cast<std::uint64_t>(m_config.fragmentDurationMs) * 1000ULL;
+            published.mediaDurationUs = static_cast<std::uint64_t>(m_config.fragmentDurationMs) * 1000ULL;
+            // One timeline record per media Group, for its first Object that starts
+            // a video PES: MSF 7.1.1 gives the record the PTS of the first media
+            // sample in the Object. mediaTimeUs above stays the pacing clock.
+            if (object.ptsUs.has_value() && st->timeline.lastGroupId != published.groupId) {
+                // MSF 7.1.1: the wallclock time SHOULD be 0 for a VOD asset.
+                st->pending.push_back(timelineObject(&st->timeline, timelineTrackName, published,
+                                                     *object.ptsUs, liveStream ? nowUnixUs() : 0));
+            }
+            ++st->objects;
+            st->bytes += published.payload.size();
+            emit stats(st->objects, st->bytes, static_cast<int64_t>(published.groupId + 1));
+
+            // Pace file-source publishing at media-time rate so data isn't dumped
+            // at wire speed before subscribers can connect.
+            if (m_config.pacedFileSource) {
+                // The release time follows the source's own clock (PCR), so a
+                // source is played out at its rate whatever the Object size. An
+                // Object without a PCR waits for the media time of the last one.
+                const std::int64_t pcrMediaUs = st->pcrClock.update(object.pcr27);
+                const bool onPcr = pcrMediaUs >= 0;
+                if (onPcr != st->pacingOnPcr) {
+                    st->pacingOnPcr = onPcr;
+                    st->pacingStartUs = -1;
+                }
+                const std::int64_t paceUs = onPcr ? pcrMediaUs : static_cast<std::int64_t>(published.mediaTimeUs);
+                if (st->pacingStartUs < 0) {
+                    st->pacingStartUs = nowSteadyUs() - paceUs;
+                }
+                while (m_running.load(std::memory_order_acquire)) {
+                    const std::int64_t delay = paceDelayUs(paceUs, nowSteadyUs() - st->pacingStartUs, kPaceSlackUs);
+                    if (delay <= 0) {
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::microseconds(std::min<std::int64_t>(delay, 5000)));
+                }
+            }
+
+            // Draft "Use of MSF Initialization Data": the new initData reaches the
+            // catalog before the Objects that rely on the changed PSI, this one first.
+            QByteArray initData;
+            if (st->packetizer->takeInitDataChange(&initData)) {
+                st->pending.push_front(std::move(published));
+                return updateCatalog(st.get(), initData);
+            }
+            return published;
+        };
+
+        const bool published = m_publisher->publishLiveObjects(m_config, trackName, QStringList{timelineTrackName},
+                                                               catalog, std::move(nextObject), m_running);
+        if (published && st->restart && m_running.load(std::memory_order_acquire)) {
+            carriedDevice = st->packetizer->device();
+            emit status(QStringLiteral("Publishing again with a new track for the changed source PAT."));
+            continue;
+        }
+        if (!published) {
+            if (m_running.load(std::memory_order_acquire)) {
+                emit error(QStringLiteral("Failed to publish MSFTS live object stream."));
             }
         }
 
-        // Draft "Use of MSF Initialization Data": the new initData reaches the
-        // catalog before the Objects that rely on the changed PSI, this one first.
-        QByteArray initData;
-        if (st->packetizer->takeInitDataChange(&initData)) {
-            st->pending.push_front(std::move(published));
-            return updateCatalog(st.get(), initData);
-        }
-        return published;
-    };
-
-    if (!m_publisher->publishLiveObjects(m_config, trackName, QStringList{timelineTrackName}, catalog, std::move(nextObject), m_running)) {
-        if (m_running.load(std::memory_order_acquire)) {
-            emit error(QStringLiteral("Failed to publish MSFTS live object stream."));
-        }
+        m_running.store(false, std::memory_order_release);
+        emit status(QStringLiteral("Pipeline exiting."));
+        return;
     }
-
-    m_running.store(false, std::memory_order_release);
-    emit status(QStringLiteral("Pipeline exiting."));
 }
 
 } // namespace moq2ts
