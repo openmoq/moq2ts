@@ -381,14 +381,18 @@ void LivePipeline::runLoop() {
     // same device, with a catalog that lists the new track only. The track names
     // carry the generation, so that the new one is not the old one under another
     // program number.
-    std::shared_ptr<QIODevice> carriedDevice;
+    std::shared_ptr<M2tsPacketizer> previousPacketizer;
     for (int generation = 1;; ++generation) {
         // Heap-allocated and shared with the nextObject lambda below, NOT a stack local.
         // See the comment on PublishState in LivePipeline.h: the lambda outlives this
         // frame whenever waitForStopped() has to detach the worker, so anything it
         // touches has to outlive the frame too.
-        auto packetizerPtr = carriedDevice ? std::make_shared<M2tsPacketizer>(carriedDevice, sourcePath)
-                                           : std::make_shared<M2tsPacketizer>(sourcePath);
+        auto packetizerPtr = previousPacketizer ? std::make_shared<M2tsPacketizer>(previousPacketizer->device(), sourcePath)
+                                                : std::make_shared<M2tsPacketizer>(sourcePath);
+        if (previousPacketizer) {
+            packetizerPtr->continueFrom(*previousPacketizer);
+            previousPacketizer.reset();
+        }
         M2tsPacketizer& packetizer = *packetizerPtr;
         // MSFTS carriage-profile knobs (msfts#7); must be set before open().
         packetizer.setTransparent(m_config.transparentMode);
@@ -585,7 +589,7 @@ void LivePipeline::runLoop() {
                                                                timelineTrackName.isEmpty() ? QStringList() : QStringList{timelineTrackName},
                                                                catalog, std::move(nextObject), m_running);
         if (published && st->restart && m_running.load(std::memory_order_acquire)) {
-            carriedDevice = st->packetizer->device();
+            previousPacketizer = st->packetizer;
             emit status(QStringLiteral("Publishing again with a new track for the changed source PAT."));
             continue;
         }

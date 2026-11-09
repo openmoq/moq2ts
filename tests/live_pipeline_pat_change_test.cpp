@@ -1,6 +1,7 @@
 #include "media/LivePipeline.h"
 #include "publish/MoqxrPublisher.h"
 #include "ts_test_builder.h"
+#include "media/SourceGapLog.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -21,6 +22,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using moq2ts::IMoqOutput;
@@ -63,9 +65,10 @@ struct Program {
 };
 
 // Rounds of 0.1 s of PCR time. Each repeats the PAT, which lists programs, and
-// the PMT, the PCR, a random access PES packet and eight more video packets of
-// every program. firstRound continues the clock across calls.
-QByteArray rounds(const std::vector<Program>& programs, int firstRound, int count) {
+// the PMT, the PCR, a PES packet (a random access point unless randomAccess is
+// false) and eight more video packets of every program. firstRound continues
+// the clock across calls.
+QByteArray rounds(const std::vector<Program>& programs, int firstRound, int count, bool randomAccess = true) {
     static int patCc = 0;
     static int pmtCc = 0;
     static int videoCc = 0;
@@ -83,7 +86,7 @@ QByteArray rounds(const std::vector<Program>& programs, int firstRound, int coun
         for (const Program& program : programs) {
             ts += pcrPacket(program.videoPid, static_cast<std::int64_t>(round) * 2700000, videoCc++ & 0x0F);
             ts += tb::tsPacket(program.videoPid, true, tb::pesHeaderWithPts(static_cast<std::uint64_t>(round) * 9000),
-                               videoCc++ & 0x0F, 0x40);
+                               videoCc++ & 0x0F, randomAccess ? 0x40 : 0x00);
             for (int k = 0; k < 8; ++k) {
                 ts += tb::tsPacket(program.videoPid, false, QByteArray(184, char(k)), videoCc++ & 0x0F);
             }
@@ -124,6 +127,7 @@ struct Session {
     QString track;
     QByteArray catalog;
     int mediaObjects = 0;
+    qint64 mediaBytes = 0;
 };
 
 class TestPublisher final : public IMoqOutput {
@@ -148,6 +152,10 @@ public:
             }
             if (object->trackName == mediaTrack) {
                 ++session.mediaObjects;
+                session.mediaBytes += object->payload.size();
+                if (session.mediaObjects == 1 && onFirstMedia) {
+                    std::exchange(onFirstMedia, nullptr)();
+                }
             }
         }
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -159,6 +167,9 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         return m_sessions;
     }
+
+    // Runs once, at the first media Object of the first session.
+    std::function<void()> onFirstMedia;
 
 private:
     bool m_connected = false;
@@ -193,7 +204,8 @@ int trackCount(const QByteArray& catalog) {
 
 // Runs an unmodified live publish of data through a FIFO.
 std::vector<Session> publish(const QString& fifo, const QByteArray& data,
-                             const std::function<void(PublishConfig&)>& adjust = {}) {
+                             const std::function<void(PublishConfig&)>& adjust = {},
+                             std::function<void()> onFirstMedia = {}) {
     ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
     std::thread writer([&] {
         const int fd = openWriter(fifo);
@@ -203,6 +215,7 @@ std::vector<Session> publish(const QString& fifo, const QByteArray& data,
         }
     });
     TestPublisher publisher;
+    publisher.onFirstMedia = std::move(onFirstMedia);
     PublishConfig cfg;
     cfg.moqEndpoint = QStringLiteral("mock://local");
     cfg.videoSource = fifo;
@@ -262,6 +275,37 @@ int main() {
             ok &= expect(track.value("mpeg2tsMode").toString() == "unmodified-multiplex", "second program: unmodified-multiplex");
             ok &= expect(trackCount(sessions[1].catalog) == 1, "second program: one mpeg2ts track");
             ok &= expect(sessions[1].mediaObjects > 0, "second program: second session publishes");
+        }
+    }
+
+    // SRT ingest records gaps at their offset in the pipe. A gap 20 rounds into
+    // the program-2 part, recorded while session 1 publishes (as while the next
+    // session waits for a subscriber), is where session 2 starts: it publishes
+    // the 20 rounds after the gap.
+    {
+        constexpr qint64 round = 12 * 188;
+        auto gaps = std::make_shared<moq2ts::SourceGapLog>();
+        const QByteArray data = rounds({one}, 0, 40) + rounds({two}, 40, 40);
+        const std::vector<Session> sessions = publish(
+            dir.filePath("gap.fifo"), data, [&](PublishConfig& cfg) { cfg.sourceGaps = gaps; },
+            [&] { gaps->record(static_cast<std::uint64_t>(60 * round)); });
+        if (expect(sessions.size() == 2, "gap after restart: two sessions")) {
+            ok &= expect(sessions[1].mediaBytes >= 19 * round && sessions[1].mediaBytes <= 20 * round,
+                         "gap after restart: session 2 publishes the 20 rounds after the gap, not " +
+                             std::to_string(sessions[1].mediaBytes) + " bytes");
+        }
+    }
+
+    // The PAT changes in what session 1 read ahead while it looked for a random
+    // access point. Session 2 publishes what session 1 read but did not use.
+    {
+        constexpr qint64 round = 12 * 188;
+        const QByteArray data = rounds({one}, 0, 5, false) + rounds({two}, 5, 40);
+        const std::vector<Session> sessions = publish(dir.filePath("read-ahead.fifo"), data);
+        if (expect(sessions.size() == 2, "read-ahead: two sessions")) {
+            ok &= expect(sessions[1].mediaBytes >= 39 * round,
+                         "read-ahead: session 2 publishes the program-2 rounds, not " +
+                             std::to_string(sessions[1].mediaBytes) + " bytes");
         }
     }
 

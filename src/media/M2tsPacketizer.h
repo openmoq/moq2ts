@@ -204,6 +204,11 @@ public:
     // The source device. A live source is read once, so a new packetizer takes
     // over this one, including what the device has buffered.
     std::shared_ptr<QIODevice> device() const;
+    // Takes over a live source from previous, which ended on a PAT change: the
+    // packets it read but did not use come first, and source offsets go on
+    // from its own, so that the gaps that SourceGapLog records by pipe offset
+    // stay aligned. Call before open(), on a packetizer of previous.device().
+    void continueFrom(const M2tsPacketizer& previous);
     // True when the first Object of every Group contains a random access point,
     // which the catalog then declares as mpeg2tsRandomAccess. Valid after open().
     bool randomAccess() const;
@@ -243,6 +248,9 @@ private:
     void measureRates(bool muxRate);
     // The next source packet, and the offset of its first byte in the source.
     QByteArray nextSourcePacket(std::uint64_t* offset);
+    // The next packet of a live source: what a previous packetizer left
+    // unread, then the device.
+    QByteArray readSourcePacket();
     // Before the first Object: when the source already skipped ahead, drop
     // what came before the gap, so that the track starts at the live edge.
     void skipToFirstGap();
@@ -381,6 +389,9 @@ private:
     bool m_sequential = false;
     QByteArray m_prebuffer;
     int m_prebufferPos = 0;
+    // What the previous packetizer of the source read but did not use.
+    QByteArray m_unread;
+    qsizetype m_unreadPos = 0;
 
     // Gaps of a live source. m_sourceOffset is the offset of the next source
     // packet readObject takes. The packet that follows a gap ends the Object
