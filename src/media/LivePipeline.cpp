@@ -137,6 +137,13 @@ MsftsCatalog packetizerCatalog(const M2tsPacketizer& packetizer, MsftsCatalog en
     entry.initData = packetizer.initData();
     entry.timelineTrack = entry.track + QStringLiteral(".timeline");
     entry.randomAccess = packetizer.randomAccess();
+    // MSF 5.2.6: the role is the content of the track. A multiplex has no single
+    // role; a program whose PMT lists no video stream is audio.
+    if (entry.mode == Mpeg2tsMode::UnmodifiedMultiplex) {
+        entry.role.clear();
+    } else {
+        entry.role = packetizer.hasVideo() ? QStringLiteral("video") : QStringLiteral("audio");
+    }
     return entry;
 }
 

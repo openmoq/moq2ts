@@ -63,6 +63,8 @@ struct MsftsCatalog {
     // MSF common track/root fields (draft-ietf-moq-msf-01).
     bool isLive = true;
     int targetLatencyMs = 1000;
+    // MSF 5.2.6: the content the track carries. Empty omits the field, as for a
+    // multiplex, which no single role describes.
     QString role = QStringLiteral("video");
     QString mimeType = QStringLiteral("video/mp2t");
     qint64 bitrateBps = 0;

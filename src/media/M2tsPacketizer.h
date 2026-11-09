@@ -203,6 +203,8 @@ public:
     bool namesProgram() const;
     // The PID whose random access points start Groups, or -1 while unknown.
     int groupPid() const;
+    // True when the PMT of the selected program lists a video stream.
+    bool hasVideo() const;
     std::uint64_t objectsRead() const;
     // Bytes that open() read and keeps for readObject to publish. Always 0
     // with timed start-up windows, whose scans keep no packet.
