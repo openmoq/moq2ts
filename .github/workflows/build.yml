@@ -26,7 +26,7 @@ env:
   # newer SDK. Each platform archive ships include/ + lib/ of static libraries so
   # moq2ts links the real publisher (MOQ2TS_BUILD_WITH_MOCK_MOQXR=OFF) and the
   # produced binaries can connect to a real relay. OpenSSL is a system dependency.
-  MOQXR_VERSION: v0.4.10
+  MOQXR_VERSION: v0.4.17
 
 jobs:
   linux:
@@ -160,10 +160,10 @@ jobs:
       - name: Install dependencies
         run: |
           brew update
-          # openssl@3.6, not openssl@3: the moqxr SDK's picotls is built against
-          # OpenSSL 3.6 and needs OPENSSL_sk_set_thunks, which openssl@3 (now
-          # 3.5) lacks.
-          brew install qt ffmpeg openh264 opus openssl@3 openssl@3.6 srt pkg-config cmake ninja
+          # openssl@4: the moqxr SDK's picotls is built against the runner's
+          # default Homebrew OpenSSL (4.1 since moqxr v0.4.15) and needs
+          # OPENSSL_sk_set_cmp_thunks, which OpenSSL 3.x lacks.
+          brew install qt ffmpeg openh264 opus openssl@3 openssl@4 srt pkg-config cmake ninja
 
       - name: Fetch moqxr SDK
         env:
@@ -184,7 +184,7 @@ jobs:
           -DMOQ2TS_BUILD_WITH_MOCK_MOQXR=OFF
           -DMOQXR_SDK_DIR="$MOQXR_SDK_DIR"
           -DCMAKE_PREFIX_PATH="$(brew --prefix qt);$(brew --prefix)"
-          -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3.6)"
+          -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@4)"
 
       - name: Build
         run: cmake --build build --parallel
