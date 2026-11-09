@@ -1588,10 +1588,12 @@ QByteArray M2tsPacketizer::lookAheadPacket(qsizetype offset) {
 }
 
 bool M2tsPacketizer::findRandomAccess() {
-    // Looks ahead on a live source, up to 20,000 packets (about 2 seconds at
-    // 10 Mbit/s), or with timed windows 10 s of PCR time, for the first random
-    // access point. The packets read stay in the prebuffer, so readObject
-    // still publishes them in order.
+    // Looks ahead on a live source for the first random access point: up to
+    // 10 s of PCR time, and up to 20,000 packets (about 2 seconds at 10 Mbit/s)
+    // without timed windows. The time bound keeps a low-rate source, which
+    // needs minutes to send 20,000 packets, from holding up the start of the
+    // track; a source without a PCR keeps the packet bound. The packets read
+    // stay in the prebuffer, so readObject still publishes them in order.
     const int maxPackets = m_timedStartWindows ? kTimedWindowMaxPackets : 20000;
     PcrSpan span(m_pcrPid);
     const int savedRapPid = m_rapPid;
@@ -1605,11 +1607,11 @@ bool M2tsPacketizer::findRandomAccess() {
         if (startsRandomAccess(pid, tsPacket)) {
             return true;
         }
+        span.add(pid, tsPacket);
+        if (span.elapsed() >= kRapWindowPcr) {
+            break;
+        }
         if (m_timedStartWindows) {
-            span.add(pid, tsPacket);
-            if (span.elapsed() >= kRapWindowPcr) {
-                break;
-            }
             if (span.stalled()) {
                 m_rapPid = savedRapPid;
                 m_startError = noPcrError();
@@ -1618,7 +1620,7 @@ bool M2tsPacketizer::findRandomAccess() {
         }
     }
     m_rapPid = savedRapPid;
-    if (m_timedStartWindows) {
+    if (m_timedStartWindows || span.elapsed() >= kRapWindowPcr) {
         qWarning("No random_access_indicator within the first %lld s of the live source; the track starts at "
                  "its first packet and does not declare mpeg2tsRandomAccess.",
                  static_cast<long long>(kRapWindowPcr / kPcrHz));
