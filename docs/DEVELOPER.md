@@ -110,8 +110,15 @@ media publishing. It currently provides:
     keeps only that service's EIT actual sections. SDT other and EIT other
     go. The NIT, BAT, TDT, and TOT pass unchanged.
   - Follows PAT and PMT changes during the session. A per-program track ends
-    when its program leaves the PAT. An unmodified-program track ends when the
-    PAT no longer lists its program alone. When the change alters initData,
+    when its program leaves the PAT. When the PAT of a live unmodified source
+    stops describing its track (the single program changes its number, the PAT
+    lists a second program, or a multiplex is left with one program), the
+    packetizer asks for a restart (`patRestartRequested`). moqxr cannot add a
+    track to a session, so `LivePipeline` ends the session and starts the next
+    one on the same device: a new packetizer reads the PSI as it is now, and the
+    catalog lists the new track only (`program-N` or `mux-N`, N counting the
+    sessions). Subscribers subscribe again. A file source keeps the old
+    behavior and ends. When the change alters initData,
     `LivePipeline::updateCatalog` publishes a new independent catalog before
     the Object that carries the change (MSF -01 Section 5.3 forbids changing
     a declared track). The other catalog fields keep their values from the
@@ -280,8 +287,9 @@ initialization data is the source PAT with the PMT of the reference program
 (draft "Use of MSF Initialization Data"). The draft does not say which PMT a
 multiplex without one carries. moq2ts carries the PMT of the first program in
 the PAT. Neither unmodified mode carries `mpeg2tsMuxRate`; the multiplex also
-omits `mpeg2tsSiPids`. The track ends when the PAT lists one program, or when
-the reference program leaves it.
+omits `mpeg2tsSiPids`. A live source then goes on in a new session with an
+unmodified-program track when the PAT lists one program; the track ends when
+the reference program leaves the PAT.
 
 Field presence is conditional:
 

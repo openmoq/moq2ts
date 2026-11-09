@@ -53,6 +53,9 @@ struct PublishState {
     std::uint64_t catalogGroupId = 0;
     // The catalog that ends a live broadcast has gone out.
     bool broadcastEnded = false;
+    // The packetizer ended the track because the source PAT changed, and the
+    // pipeline starts a session with a new track.
+    bool restart = false;
     std::shared_ptr<M2tsPacketizer> packetizer;   // file / SRT path
     std::shared_ptr<void> capture;                // capture path (LibavCaptureSource)
 };
