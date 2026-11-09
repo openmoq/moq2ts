@@ -1551,6 +1551,64 @@ int main() {
                      "PCR: a PCR on another PID is not the clock");
     }
 
+    // A source without a random access indicator still gets Groups: one starts
+    // at a PES start of the group PID every 2 s of PCR time (the PCR advances
+    // 0.1 s per round of the stream below), and the catalog does not declare
+    // mpeg2tsRandomAccess. A source with indicators keeps Groups at them.
+    for (const int rapEvery : {0, 30}) {
+        const std::string label = rapEvery == 0 ? "no RAI: " : "RAI every 3 s: ";
+        QByteArray ts;
+        int videoCc = 0;
+        for (int round = 0; round < 100; ++round) {
+            ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}), round & 0x0F);
+            ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}), round & 0x0F);
+            ts += pcrPacket(0x100, static_cast<std::int64_t>(round) * 2700000, videoCc++);
+            const bool rai = rapEvery > 0 && round % rapEvery == 0;
+            ts += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(static_cast<std::uint64_t>(round) * 9000), videoCc++,
+                               rai ? 0x40 : -1);
+            for (int k = 0; k < 8; ++k) {
+                ts += tb::tsPacket(0x100, false, QByteArray(184, char(k)), videoCc++);
+            }
+        }
+        const QString path = dir.filePath(rapEvery == 0 ? "no-rai.ts" : "rai-3s.ts");
+        ok &= expect(writeFile(path, ts), label + "write the stream");
+        M2tsPacketizer packetizer(path);
+        QString error;
+        ok &= expect(packetizer.open(0, &error), label + "opens: " + error.toStdString());
+        M2tsObject object;
+        int starts = 0;
+        std::uint64_t previousGroup = 0;
+        bool first = true;
+        bool startsAtPes = true;
+        bool idsStep = true;
+        bool objectZero = true;
+        while (packetizer.readObject(4, &object, &error)) {
+            if (object.startsGroup) {
+                ++starts;
+                const QByteArray head = object.payload.left(188);
+                // The first Object of a Group begins at a PES start of PID 0x100.
+                startsAtPes &= pidOfPacket(head) == 0x100 && (static_cast<unsigned char>(head[1]) & 0x40) != 0;
+                objectZero &= object.objectId == 0;
+                if (!first) {
+                    idsStep &= object.groupId == previousGroup + 1;
+                }
+            }
+            previousGroup = object.groupId;
+            first = false;
+        }
+        if (rapEvery == 0) {
+            ok &= expect(starts >= 4 && starts <= 5, label + "a Group about every 2 s: " + std::to_string(starts));
+            ok &= expect(!packetizer.randomAccess(), label + "mpeg2tsRandomAccess stays undeclared");
+        } else {
+            ok &= expect(starts == 4, label + "Groups start at the random access points only: " + std::to_string(starts));
+        }
+        if (rapEvery == 0) {
+            ok &= expect(startsAtPes, label + "a Group starts at a PES start of the group PID");
+        }
+        ok &= expect(idsStep, label + "Group IDs step by one");
+        ok &= expect(objectZero, label + "a Group starts with Object 0");
+    }
+
     if (ok) {
         std::cout << "m2ts packetizer tests passed\n";
     }
