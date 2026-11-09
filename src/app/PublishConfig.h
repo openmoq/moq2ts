@@ -53,6 +53,9 @@ struct PublishConfig {
     bool pacedFileSource = false;    // pace file-source publishing at media-time rate
     int draftVersion = 22;              // MOQT transport draft version
     bool insecure = false;              // skip verifying the relay certificate (--insecure)
+    // A live publish connects to the relay again when the connection ends,
+    // and goes on from the next Group (--no-reconnect turns it off).
+    bool reconnect = true;
     // Set by the pipeline: the source is live (capture, FIFO, pipe, or SRT),
     // so the publish waits for subscribers for as long as it runs, and a
     // session that ends before the source does is an error.
