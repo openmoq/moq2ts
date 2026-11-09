@@ -143,6 +143,12 @@ public:
     // live source ends too soon: a file publish ends after its bounded wait,
     // as before.
     static QString unexpectedEndReason(bool liveSource, bool running, bool publisherStopped, bool sourceEnded);
+    // The catalog Group that starts a connection, after lastGroup (0 before
+    // the first). MSF -01 Section 6.1: a restarted publisher starts above
+    // every Group it published, and the wallclock in ms also starts above the
+    // Groups of an earlier process. A relay may still cache those, and would
+    // serve its old Object under a reused ID.
+    static std::uint64_t catalogRestartGroup(std::uint64_t lastGroup, std::uint64_t nowMs);
 
 signals:
     void connectionStateChanged(bool connected, const QString& message);
@@ -165,6 +171,9 @@ private:
     QString m_namespace;
     QString m_endpoint;
     mutable QMutex m_mutex;
+    // The last catalog Group sent, across connections and sessions. Only the
+    // publish thread touches it, one publish at a time.
+    std::uint64_t m_lastCatalogGroup = 0;
 #ifdef MOQ2TS_HAS_MOQXR
     std::shared_ptr<openmoq::publisher::Publisher> m_activePublisher;
 #endif
