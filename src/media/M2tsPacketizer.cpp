@@ -1709,6 +1709,10 @@ bool M2tsPacketizer::namesProgram() const {
     return !(m_transparent && m_patProgramCount > 1) || m_requestedProgramNumber != 0;
 }
 
+bool M2tsPacketizer::hasVideo() const {
+    return m_videoPid >= 0;
+}
+
 int M2tsPacketizer::groupPid() const {
     return m_rapPid >= 0 ? m_rapPid : -1;
 }

@@ -35,7 +35,9 @@ void appendTracks(const MsftsCatalog& catalog, QJsonArray& tracks) {
     mediaTrack.insert(QStringLiteral("packaging"), QStringLiteral("mpeg2ts"));
     // MSF common track fields (draft-ietf-moq-msf-01).
     mediaTrack.insert(QStringLiteral("isLive"), catalog.isLive);
-    mediaTrack.insert(QStringLiteral("role"), catalog.role);
+    if (!catalog.role.isEmpty()) {
+        mediaTrack.insert(QStringLiteral("role"), catalog.role);
+    }
     mediaTrack.insert(QStringLiteral("mimeType"), catalog.mimeType);
     if (catalog.isLive) {
         // targetLatency MUST NOT be present when isLive is false (MSF 5.1.16).

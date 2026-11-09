@@ -48,6 +48,17 @@ int main() {
         ok &= expect(!track.contains("mpeg2tsSiPids"), "unmodified-program: no SI PIDs");
     }
 
+    // The role is the content of the track (MSF 5.2.6): written as set, and
+    // omitted when empty, as for a multiplex.
+    {
+        MsftsCatalog catalog = baseCatalog(Mpeg2tsMode::PerProgram);
+        ok &= expect(mediaTrack(MsftsMuxer::catalogJson(catalog)).value("role").toString() == "video", "role: video");
+        catalog.role = QStringLiteral("audio");
+        ok &= expect(mediaTrack(MsftsMuxer::catalogJson(catalog)).value("role").toString() == "audio", "role: audio");
+        catalog.role.clear();
+        ok &= expect(!mediaTrack(MsftsMuxer::catalogJson(catalog)).contains("role"), "role: omitted when empty");
+    }
+
     // unmodified-multiplex with a reference program: its number and PCR PID,
     // and random access when declared. The mux rate and SI PIDs stay out.
     {
