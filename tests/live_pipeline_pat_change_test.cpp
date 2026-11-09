@@ -175,6 +175,14 @@ QJsonObject mediaTrack(const QByteArray& catalog, const QString& name) {
     return {};
 }
 
+int timelineTrackCount(const QByteArray& catalog) {
+    int count = 0;
+    for (const QJsonValue& track : QJsonDocument::fromJson(catalog).object().value(QStringLiteral("tracks")).toArray()) {
+        count += track.toObject().value(QStringLiteral("packaging")).toString() == QLatin1String("mediatimeline") ? 1 : 0;
+    }
+    return count;
+}
+
 int trackCount(const QByteArray& catalog) {
     int count = 0;
     for (const QJsonValue& track : QJsonDocument::fromJson(catalog).object().value(QStringLiteral("tracks")).toArray()) {
@@ -184,7 +192,8 @@ int trackCount(const QByteArray& catalog) {
 }
 
 // Runs an unmodified live publish of data through a FIFO.
-std::vector<Session> publish(const QString& fifo, const QByteArray& data) {
+std::vector<Session> publish(const QString& fifo, const QByteArray& data,
+                             const std::function<void(PublishConfig&)>& adjust = {}) {
     ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
     std::thread writer([&] {
         const int fd = openWriter(fifo);
@@ -200,6 +209,9 @@ std::vector<Session> publish(const QString& fifo, const QByteArray& data) {
     cfg.transparentMode = true;
     cfg.fragmentDurationMs = 0;
     cfg.targetSegmentBytes = 4 * 188;
+    if (adjust) {
+        adjust(cfg);
+    }
     publisher.connect(cfg);
     moq2ts::LivePipeline pipeline;
     pipeline.start(cfg, &publisher);
@@ -257,6 +269,30 @@ int main() {
     {
         const std::vector<Session> sessions = publish(dir.filePath("steady.fifo"), rounds({one}, 0, 60));
         ok &= expect(sessions.size() == 1 && sessions[0].track == "program-1", "steady: one session, program-1");
+    }
+
+    // The media timeline: the catalog declares the accessible window, which
+    // the timeline is trimmed to; the window and the track can be turned off.
+    {
+        const QByteArray data = rounds({one}, 0, 40);
+        const std::vector<Session> byDefault = publish(dir.filePath("timeline-default.fifo"), data);
+        if (expect(byDefault.size() == 1, "timeline: one session")) {
+            ok &= expect(mediaTrack(byDefault[0].catalog, "program-1").value("accessibleWindowTime").toInt() == 300000,
+                         "timeline: the default window is 300 s");
+            ok &= expect(timelineTrackCount(byDefault[0].catalog) == 1, "timeline: the track is published");
+        }
+        const std::vector<Session> unbounded = publish(dir.filePath("timeline-unbounded.fifo"), data,
+                                                       [](PublishConfig& cfg) { cfg.accessibleWindowMs = 0; });
+        if (expect(unbounded.size() == 1, "unbounded: one session")) {
+            ok &= expect(!mediaTrack(unbounded[0].catalog, "program-1").contains("accessibleWindowTime"),
+                         "unbounded: no window declared");
+        }
+        const std::vector<Session> none = publish(dir.filePath("timeline-none.fifo"), data,
+                                                  [](PublishConfig& cfg) { cfg.timelineTrack = false; });
+        if (expect(none.size() == 1, "no timeline: one session")) {
+            ok &= expect(timelineTrackCount(none[0].catalog) == 0, "no timeline: no mediatimeline track");
+            ok &= expect(none[0].mediaObjects > 0, "no timeline: the media still publishes");
+        }
     }
 
     return ok ? 0 : 1;

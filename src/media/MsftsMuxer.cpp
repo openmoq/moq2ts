@@ -46,6 +46,9 @@ void appendTracks(const MsftsCatalog& catalog, QJsonArray& tracks) {
     if (catalog.bitrateBps > 0) {
         mediaTrack.insert(QStringLiteral("bitrate"), catalog.bitrateBps);
     }
+    if (catalog.isLive && catalog.accessibleWindowMs > 0) {
+        mediaTrack.insert(QStringLiteral("accessibleWindowTime"), catalog.accessibleWindowMs);
+    }
     // MSFTS mpeg2ts-specific fields (draft-gregoire-moq-msfts).
     mediaTrack.insert(QStringLiteral("mpeg2tsPacketSize"), catalog.packetSize);
     // mpeg2tsMode is required (draft-gregoire-moq-msfts).

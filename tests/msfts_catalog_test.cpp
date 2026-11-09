@@ -48,6 +48,21 @@ int main() {
         ok &= expect(!track.contains("mpeg2tsSiPids"), "unmodified-program: no SI PIDs");
     }
 
+    // accessibleWindowTime (editor's copy of MSF) is declared on a live media
+    // track with a window, and on no other.
+    {
+        MsftsCatalog catalog = baseCatalog(Mpeg2tsMode::PerProgram);
+        catalog.isLive = true;
+        ok &= expect(!mediaTrack(MsftsMuxer::catalogJson(catalog)).contains("accessibleWindowTime"),
+                     "window: absent without a window");
+        catalog.accessibleWindowMs = 300000;
+        ok &= expect(mediaTrack(MsftsMuxer::catalogJson(catalog)).value("accessibleWindowTime").toInt() == 300000,
+                     "window: declared in ms on a live track");
+        catalog.isLive = false;
+        ok &= expect(!mediaTrack(MsftsMuxer::catalogJson(catalog)).contains("accessibleWindowTime"),
+                     "window: absent on a VOD track");
+    }
+
     // The role is the content of the track (MSF 5.2.6): written as set, and
     // omitted when empty, as for a multiplex.
     {

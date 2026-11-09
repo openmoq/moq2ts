@@ -56,6 +56,14 @@ struct PublishConfig {
     // A live publish connects to the relay again when the connection ends,
     // and goes on from the next Group (--no-reconnect turns it off).
     bool reconnect = true;
+    // The media timeline track of a live track. The editor's copy of MSF asks a
+    // publisher to trim it to the track's accessibleWindowTime; the catalog
+    // declares that window, and the timeline keeps the records inside it. 0
+    // declares nothing and keeps every record. A record weighs about 36 bytes,
+    // and every Group repeats the whole timeline.
+    int accessibleWindowMs = 300000;
+    // False publishes no timeline track (MSF 7 makes it optional).
+    bool timelineTrack = true;
     // Set by the pipeline: the source is live (capture, FIFO, pipe, or SRT),
     // so the publish waits for subscribers for as long as it runs, and a
     // session that ends before the source does is an error.

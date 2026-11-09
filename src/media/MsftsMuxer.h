@@ -69,6 +69,10 @@ struct MsftsCatalog {
     QString mimeType = QStringLiteral("video/mp2t");
     qint64 bitrateBps = 0;
     qint64 generatedAtMs = 0;
+    // MSF accessibleWindowTime (editor's copy): the time in ms behind the live
+    // edge during which content stays accessible. Emitted on a live media track
+    // when > 0.
+    qint64 accessibleWindowMs = 0;
 };
 
 // The mpeg2tsMuxRate (MSFTS 6.7) for a program measured at measuredBps: 10 %
