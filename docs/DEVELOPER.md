@@ -321,6 +321,13 @@ Field presence is conditional:
   file keeps byte 0 and does not declare it. SRT also omits the field: its
   recovery safety fallback may start a Group without a random access point.
   Groups longer than 2 seconds give an operational warning, not a draft violation.
+  A source that has shown no random access point yet (radio programs and some
+  encoders never set the indicator) would stay in Group 0 and give a Next Group
+  Start subscriber nothing, so a Group starts at the next PES start of the group
+  PID once 2 seconds of PCR time passed since the last start. This only runs
+  until the first random access point; the field stays undeclared. The look-ahead
+  for the first random access point reads up to 20,000 packets before the track
+  starts, which takes minutes on a low-rate live source.
 
 ## Timeline track
 

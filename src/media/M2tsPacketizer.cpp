@@ -1203,7 +1203,8 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     QByteArray payload;
     payload.reserve(packets * m_packetSize);
     // Only a gap leaves a packet carried over.
-    if (!m_carryPacket.isEmpty()) {
+    const bool carriedForTime = std::exchange(m_carryTimed, false);
+    if (!m_carryPacket.isEmpty() && !carriedForTime) {
         m_groupStartsAtGap = true;
         m_gapCauses |= std::exchange(m_carryGapCauses, 0u);
     }
@@ -1261,6 +1262,12 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         // keeps its buffer: not after the PAT rewrite below replaces it.
         const QByteArray tsView = QByteArray::fromRawData(packet.constData() + (m_packetSize == 192 ? 4 : 0), 188);
         const int pid = pidOf(tsView);
+        if (!m_sawFirstRap && m_pcrPid >= 0 && pid == m_pcrPid) {
+            const std::int64_t pcr = pcrOf(tsView);
+            if (pcr >= 0) {
+                m_lastPcr27 = pcr;
+            }
+        }
         if (pid == 0x0000 || pid == m_pmtPid) {
             handlePsiPacket(tsView, packet);
             if (m_ended) {
@@ -1316,6 +1323,19 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
                 packet.data()[(m_packetSize == 192 ? 4 : 0) + 5] |= 0x80;
                 m_markDiscontinuity = false;
             }
+        }
+        // No random access point yet: a Group starts at a PES start of the group
+        // PID once 2 s of PCR time passed since the last start. The packet
+        // that starts it begins the next Object when this one has packets.
+        if (!m_sawFirstRap && m_rapPid >= 0 && pid == m_rapPid && payloadUnitStart(tsView) && timedGroupDue()) {
+            if (!payload.isEmpty()) {
+                m_carryPacket = std::move(packet);
+                m_carryOffset = packetOffset;
+                m_carryGapCauses = 0;
+                m_carryTimed = true;
+                break;
+            }
+            m_groupStartsTimed = true;
         }
         if (payload.isEmpty()) {
             firstOffset = packetOffset;
@@ -1381,7 +1401,9 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     // A gap starts a Group even where the source resumed off a random access
     // point of the group PID.
     const bool gapStart = std::exchange(m_groupStartsAtGap, false);
-    if ((rapDetected && m_sawFirstRap) || (gapStart && m_nextObjectId > 0)) {
+    const bool timedStart = std::exchange(m_groupStartsTimed, false);
+    if ((rapDetected && (m_sawFirstRap || m_timedGroups > 0)) || (gapStart && m_nextObjectId > 0) ||
+        (timedStart && m_nextObjectId > 0)) {
         // New group at this RAP boundary
         ++m_currentGroupId;
         m_nextObjectIdInGroup = 0;
@@ -1396,6 +1418,15 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     }
     if (gapStart) {
         m_gapCauses = 0;
+    }
+    if (timedStart && m_nextObjectId > 0) {
+        if (m_timedGroups++ == 0) {
+            qWarning("%s: No random access point so far: Groups start at a PES start of PID %d every 2 s of PCR time "
+                     "until one arrives.", qUtf8Printable(m_label), m_rapPid);
+        }
+    }
+    if (timedStart || rapDetected) {
+        m_groupStartPcr27 = m_lastPcr27;
     }
     // Report long GOPs as an operational latency hint. MSFTS-02 does not set a
     // maximum Group duration.
@@ -1416,7 +1447,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     object->sourceOffset = firstOffset;
     object->groupId = m_currentGroupId;
     object->objectId = m_nextObjectIdInGroup++;
-    object->startsGroup = rapDetected || gapStart;
+    object->startsGroup = rapDetected || gapStart || timedStart;
     ++m_nextObjectId;
     return true;
 }
@@ -1488,7 +1519,31 @@ void M2tsPacketizer::skipToFirstGap() {
              qUtf8Printable(m_label), gapReason(causes).constData(), static_cast<unsigned long long>(skipped), seconds);
 }
 
+namespace {
+// 2 s of the 27 MHz PCR clock; the PCR wraps at 2^33 * 300.
+constexpr std::int64_t kTimedGroupPcrTicks = 2 * 27000000;
+constexpr std::int64_t kPcrWrap = (std::int64_t{1} << 33) * 300;
+}  // namespace
+
+bool M2tsPacketizer::timedGroupDue() {
+    if (m_lastPcr27 < 0) {
+        return false;
+    }
+    if (m_groupStartPcr27 < 0) {
+        m_groupStartPcr27 = m_lastPcr27;   // the first PCR starts the measure
+        return false;
+    }
+    std::int64_t elapsed = m_lastPcr27 - m_groupStartPcr27;
+    if (elapsed < 0) {
+        elapsed += kPcrWrap;
+    }
+    return elapsed >= kTimedGroupPcrTicks;
+}
+
 void M2tsPacketizer::restartAfterGap(bool discontinuity) {
+    // The PCR may jump across the gap.
+    m_lastPcr27 = -1;
+    m_groupStartPcr27 = -1;
     // A section in progress cannot continue across the gap.
     m_patAssembler.reset();
     m_pmtAssembler.reset();

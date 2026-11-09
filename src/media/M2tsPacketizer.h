@@ -347,6 +347,17 @@ private:
     std::uint64_t m_currentGroupId = 0;
     std::uint64_t m_nextObjectIdInGroup = 0;
     bool m_sawFirstRap = false;
+    // A source that shows no random access point still gets Groups: one starts
+    // at the next PES start of the group PID once kTimedGroupPcrTicks of PCR
+    // time passed since the last start (MSFTS 5.2 sets no upper bound on a
+    // Group; MOQT makes the start of a Group the join point). Only until the
+    // first random access point.
+    std::int64_t m_lastPcr27 = -1;        // the latest PCR of the PCR PID
+    std::int64_t m_groupStartPcr27 = -1;  // the PCR when the current Group started
+    bool m_groupStartsTimed = false;      // the next Object starts a Group on time
+    bool m_carryTimed = false;            // m_carryPacket waits for a Group on time
+    int m_timedGroups = 0;
+    bool timedGroupDue();
     // The PID on which we trigger group boundaries. Set to the first PID where
     // random_access_indicator is observed; in practice this is the video PID.
     // -1: latch on the first PID with a random access indicator. kAwaitingPmt:
