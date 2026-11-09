@@ -91,6 +91,7 @@ jobs:
           QMAKE: /usr/lib/qt6/bin/qmake6
           # linuxdeploy's appimage plugin names the output after this bare filename.
           OUTPUT: moq2ts-publisher-linux-x86_64.AppImage
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eux
           DESTDIR="$PWD/AppDir" cmake --install build --prefix /usr
@@ -107,8 +108,13 @@ jobs:
           EOF
           convert -size 256x256 xc:'#1565c0' \
             AppDir/usr/share/icons/hicolor/256x256/apps/moq2ts-publisher.png
-          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          # Fetch through the GitHub API, like the moqxr SDK: the direct
+          # releases/download links have returned 503 and 504 while the API
+          # still served the same assets.
+          gh release download continuous --repo linuxdeploy/linuxdeploy \
+            --pattern 'linuxdeploy-x86_64.AppImage'
+          gh release download continuous --repo linuxdeploy/linuxdeploy-plugin-qt \
+            --pattern 'linuxdeploy-plugin-qt-x86_64.AppImage'
           chmod +x linuxdeploy*.AppImage
           ./linuxdeploy-x86_64.AppImage --appdir AppDir --plugin qt \
             --desktop-file AppDir/usr/share/applications/moq2ts-publisher.desktop \
