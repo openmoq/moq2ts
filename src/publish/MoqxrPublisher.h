@@ -13,6 +13,7 @@
 #include <optional>
 
 #include "../app/PublishConfig.h"
+#include "ReconnectPolicy.h"
 
 #ifdef MOQ2TS_HAS_MOQXR
 namespace openmoq::publisher {
@@ -175,6 +176,10 @@ private:
     // The last catalog Group sent, across connections and sessions. Only the
     // publish thread touches it, one publish at a time.
     std::uint64_t m_lastCatalogGroup = 0;
+    // Outlives one publish, so that a new session after a PAT change keeps
+    // the retry rule of a process whose connection has worked. Only the
+    // publish thread touches it, one publish at a time.
+    ReconnectPolicy m_reconnectPolicy;
 #ifdef MOQ2TS_HAS_MOQXR
     std::shared_ptr<openmoq::publisher::Publisher> m_activePublisher;
 #endif

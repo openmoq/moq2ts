@@ -345,7 +345,8 @@ int main(int argc, char** argv) {
                        "CA bundle.")));
     parser.addOption(QCommandLineOption(QStringLiteral("no-reconnect"),
         QStringLiteral("Exit when the relay connection ends. By default a live publish connects to the relay "
-                       "again, with a backoff of 1 s up to 30 s, and goes on from the next Group.")));
+                       "again after 2 s, then 2 s longer after each failed attempt up to 60 s, and goes on from the next "
+                       "Group. It exits with status 1 when 10 attempts fail before any connection has worked.")));
     addValue(QStringLiteral("auth-token-file"),
              QStringLiteral("A file that holds the authorization token that the session setup carries, as raw bytes "
                             "or as text that starts with \"base64:\" or \"hex:\". moq2ts never logs it."),

@@ -511,6 +511,18 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(moq2ts-object-lookahead-tests PRIVATE moq2ts-core)
     add_test(NAME moq2ts-object-lookahead-tests COMMAND moq2ts-object-lookahead-tests)
 
+    add_executable(moq2ts-reconnect-policy-tests tests/reconnect_policy_test.cpp)
+    target_include_directories(moq2ts-reconnect-policy-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME moq2ts-reconnect-policy-tests COMMAND moq2ts-reconnect-policy-tests)
+
+    if(NOT MOQ2TS_BUILD_WITH_MOCK_MOQXR)
+        add_executable(moq2ts-relay-unreachable-tests tests/relay_unreachable_test.cpp)
+        target_include_directories(moq2ts-relay-unreachable-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_link_libraries(moq2ts-relay-unreachable-tests PRIVATE moq2ts-core)
+        add_test(NAME moq2ts-relay-unreachable-tests COMMAND moq2ts-relay-unreachable-tests)
+        set_tests_properties(moq2ts-relay-unreachable-tests PROPERTIES TIMEOUT 300 LABELS slow)
+    endif()
+
     # LivePipeline on a FIFO with source gaps, as SRT ingest feeds it.
     add_executable(moq2ts-live-pipeline-gap-tests tests/live_pipeline_gap_test.cpp)
     target_include_directories(moq2ts-live-pipeline-gap-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
