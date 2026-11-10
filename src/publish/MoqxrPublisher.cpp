@@ -287,7 +287,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                     const int64_t bytes = state->bytes.fetch_add(state->catalog.size(), std::memory_order_acq_rel) +
                                           state->catalog.size();
                     emit framePublished(QStringLiteral("catalog"), bytes, objects);
-                    m_lastCatalogGroup = catalogRestartGroup(
+                    m_lastCatalogGroup = nextCatalogGroup(
                         m_lastCatalogGroup, static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch()));
                     return openmoq::publisher::LiveObject{
                         .track_name = kCatalogTrackName,
@@ -326,7 +326,9 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                     if (track == kCatalogTrackName) {
                         // A reconnection sends this one first.
                         state->catalog = current.payload;
-                        wireGroupId = ++m_lastCatalogGroup;
+                        m_lastCatalogGroup = nextCatalogGroup(
+                            m_lastCatalogGroup, static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch()));
+                        wireGroupId = m_lastCatalogGroup;
                     }
                     const int64_t objects = state->objects.fetch_add(1, std::memory_order_acq_rel) + 1;
                     const int64_t bytes = state->bytes.fetch_add(current.payload.size(), std::memory_order_acq_rel) +
@@ -543,8 +545,8 @@ std::chrono::seconds MoqxrPublisher::subscriberTimeout(bool liveSource) {
     return awaitsSubscriberIndefinitely() ? std::chrono::seconds(30) : std::chrono::hours(24 * 365 * 10);
 }
 
-std::uint64_t MoqxrPublisher::catalogRestartGroup(std::uint64_t lastGroup, std::uint64_t nowMs) {
-    return std::max(lastGroup + 1, nowMs);
+std::uint64_t MoqxrPublisher::nextCatalogGroup(std::uint64_t lastGroup, std::uint64_t nowMs) {
+    return lastGroup == 0 ? nowMs : lastGroup + 1;
 }
 
 QString MoqxrPublisher::unexpectedEndReason(bool liveSource, bool running, bool publisherStopped, bool sourceEnded) {

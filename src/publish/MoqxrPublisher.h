@@ -143,12 +143,12 @@ public:
     // live source ends too soon: a file publish ends after its bounded wait,
     // as before.
     static QString unexpectedEndReason(bool liveSource, bool running, bool publisherStopped, bool sourceEnded);
-    // The catalog Group that starts a connection, after lastGroup (0 before
-    // the first). MSF -01 Section 6.1: a restarted publisher starts above
-    // every Group it published, and the wallclock in ms also starts above the
-    // Groups of an earlier process. A relay may still cache those, and would
-    // serve its old Object under a reused ID.
-    static std::uint64_t catalogRestartGroup(std::uint64_t lastGroup, std::uint64_t nowMs);
+    // The Group of the next catalog Object, after lastGroup (0 before the
+    // first): one more, across connections and sessions too. MSF -01 Section
+    // 6.1: a restarted publisher starts above every Group it published. The
+    // first one of a process is the wallclock in ms, so that it also starts
+    // above the Groups of an earlier process, which a relay may still cache.
+    static std::uint64_t nextCatalogGroup(std::uint64_t lastGroup, std::uint64_t nowMs);
 
 signals:
     void connectionStateChanged(bool connected, const QString& message);
