@@ -95,7 +95,8 @@ bool readRelay(const QJsonObject& root, PublishConfig* relay, QString* error) {
     if (!readObject(root, QStringLiteral("relay"), QStringLiteral("relay"), &object, error) ||
         !checkKeys(object, QStringLiteral("relay"),
                    {QStringLiteral("endpoint"), QStringLiteral("namespace"), QStringLiteral("draft"),
-                    QStringLiteral("insecure")},
+                    QStringLiteral("insecure"), QStringLiteral("auth_token"), QStringLiteral("auth_token_file"),
+                    QStringLiteral("auth_token_type")},
                    error) ||
         !readString(object, QStringLiteral("endpoint"), QStringLiteral("relay.endpoint"), true, &relay->moqEndpoint,
                     error) ||
@@ -114,6 +115,26 @@ bool readRelay(const QJsonObject& root, PublishConfig* relay, QString* error) {
                                .arg(MoqxrPublisher::supportedDrafts()));
     }
     relay->draftVersion = static_cast<int>(draft);
+    if (object.contains(QStringLiteral("auth_token")) && object.contains(QStringLiteral("auth_token_file"))) {
+        return fail(error, QStringLiteral("relay: holds both \"auth_token\" and \"auth_token_file\"; it holds one "
+                                          "of them at most."));
+    }
+    // The token is a secret: an error names the field, never the value.
+    const QJsonValue token = object.value(QStringLiteral("auth_token"));
+    if (!token.isUndefined()) {
+        if (!token.isString() || token.toString().isEmpty()) {
+            return fail(error, QStringLiteral("relay.auth_token: not a non-empty string."));
+        }
+        relay->authToken = token.toString().toUtf8();
+    }
+    qint64 tokenType = static_cast<qint64>(relay->authTokenType);
+    if (!readString(object, QStringLiteral("auth_token_file"), QStringLiteral("relay.auth_token_file"), false,
+                    &relay->authTokenFile, error) ||
+        !readInt(object, QStringLiteral("auth_token_type"), QStringLiteral("relay.auth_token_type"), 0,
+                 kMaxAuthTokenType, false, &tokenType, error)) {
+        return false;
+    }
+    relay->authTokenType = static_cast<quint64>(tokenType);
     const QJsonValue insecure = object.value(QStringLiteral("insecure"));
     if (!insecure.isUndefined()) {
         if (!insecure.isBool()) {

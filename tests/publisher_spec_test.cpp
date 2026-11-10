@@ -160,6 +160,36 @@ int main() {
                   {QStringLiteral("accessible_window_ms: -1 is not an integer from 0 to 2000000000.")},
                   "a negative accessible window");
 
+    // The relay authorization token, opaque to moq2ts: a value or a file, of
+    // the token type that the relay expects (16 by default, as moqx).
+    {
+        PublisherSpec spec;
+        QString error;
+        ok &= expect(parsePublisherSpec(kExample, &spec, &error) && spec.relay.authToken.isEmpty() &&
+                         spec.relay.authTokenFile.isEmpty() && spec.relay.authTokenType == 16,
+                     "no token by default, of type 16: " + error.toStdString());
+        ok &= expect(parsePublisherSpec(exampleWith(R"("draft": 22)",
+                                                    R"("draft": 22, "auth_token": "base64:AAEC", "auth_token_type": 0)"),
+                                        &spec, &error) &&
+                         spec.relay.authToken == QByteArray("base64:AAEC") && spec.relay.authTokenType == 0,
+                     "relay.auth_token and relay.auth_token_type parse: " + error.toStdString());
+        ok &= expect(parsePublisherSpec(exampleWith(R"("draft": 22)", R"("draft": 22, "auth_token_file": "/run/token")"),
+                                        &spec, &error) &&
+                         spec.relay.authTokenFile == QStringLiteral("/run/token"),
+                     "relay.auth_token_file parses: " + error.toStdString());
+    }
+    ok &= rejects(exampleWith(R"("draft": 22)", R"("draft": 22, "auth_token": "x", "auth_token_file": "/run/token")"),
+                  {QStringLiteral("relay: holds both \"auth_token\" and \"auth_token_file\"")},
+                  "a token given twice");
+    {
+        // The error names the field, never the token.
+        PublisherSpec spec;
+        QString error;
+        parsePublisherSpec(exampleWith(R"("draft": 22)", R"("draft": 22, "auth_token": 12345678)"), &spec, &error);
+        ok &= expect(error.contains(QStringLiteral("relay.auth_token")) && !error.contains(QStringLiteral("12345678")),
+                     "a malformed token is named, not echoed: " + error.toStdString());
+    }
+
     // Unknown keys are refused at every level, by their full path.
     ok &= rejects(exampleWith(R"("segment_bytes": 65536)", R"("segment_bytes": 65536, "segment_byte": 1)"),
                   {QStringLiteral("segment_byte: unknown key")}, "unknown root key");
