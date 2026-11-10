@@ -1,6 +1,8 @@
-// The real moqxr publish path against a relay that cannot be resolved: a
-// live publish gives up after the bound of ReconnectPolicy and reports why.
-// Slow: the waits add up to 90 s.
+// The real moqxr publish path against a relay that cannot be resolved: moqxr
+// (v0.4.18 and later) reports that as a permanent failure, so a live publish
+// that never connected ends on the first attempt and says why, instead of
+// retrying. Before v0.4.18 it was a transient failure that ReconnectPolicy
+// bounded at 10 attempts.
 #include "app/PublishConfig.h"
 #include "publish/MoqxrPublisher.h"
 
@@ -27,8 +29,9 @@ int main() {
         std::cerr << "FAIL: the publish to an unresolvable relay succeeded\n";
         ok = false;
     }
-    if (!error.contains(QStringLiteral("giving up after 10 attempts"))) {
-        std::cerr << "FAIL: the error does not say that the publish gave up: " << error.toStdString() << '\n';
+    // Either the permanent failure of moqxr, or the bound of ReconnectPolicy.
+    if (!error.contains(QStringLiteral("failed to resolve")) && !error.contains(QStringLiteral("giving up after 10 attempts"))) {
+        std::cerr << "FAIL: the error names neither the address nor the give-up: " << error.toStdString() << '\n';
         ok = false;
     }
     return ok ? 0 : 1;
