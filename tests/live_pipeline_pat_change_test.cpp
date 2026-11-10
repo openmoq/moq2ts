@@ -289,7 +289,8 @@ int main() {
         const std::vector<Session> sessions = publish(
             dir.filePath("gap.fifo"), data, [&](PublishConfig& cfg) { cfg.sourceGaps = gaps; },
             [&] { gaps->record(static_cast<std::uint64_t>(60 * round)); });
-        if (expect(sessions.size() == 2, "gap after restart: two sessions")) {
+        ok &= expect(sessions.size() == 2, "gap after restart: two sessions");
+        if (sessions.size() == 2) {
             ok &= expect(sessions[1].mediaBytes >= 19 * round && sessions[1].mediaBytes <= 20 * round,
                          "gap after restart: session 2 publishes the 20 rounds after the gap, not " +
                              std::to_string(sessions[1].mediaBytes) + " bytes");
@@ -302,7 +303,8 @@ int main() {
         constexpr qint64 round = 12 * 188;
         const QByteArray data = rounds({one}, 0, 5, false) + rounds({two}, 5, 40);
         const std::vector<Session> sessions = publish(dir.filePath("read-ahead.fifo"), data);
-        if (expect(sessions.size() == 2, "read-ahead: two sessions")) {
+        ok &= expect(sessions.size() == 2, "read-ahead: two sessions");
+        if (sessions.size() == 2) {
             ok &= expect(sessions[1].mediaBytes >= 39 * round,
                          "read-ahead: session 2 publishes the program-2 rounds, not " +
                              std::to_string(sessions[1].mediaBytes) + " bytes");
