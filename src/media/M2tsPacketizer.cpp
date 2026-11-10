@@ -524,7 +524,8 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     // FIFOs, pipes and /dev/stdin are non-seekable; readObject drains a prebuffer
     // instead of rewinding (see scanPsi).
     m_sequential = m_device->isSequential();
-    if (!detectPacketSize(error)) {
+    // A continued source keeps the packet size of the previous packetizer.
+    if (m_packetSize == 0 && !detectPacketSize(error)) {
         return false;
     }
     // Both modes read the PAT and the PMT of the selected program first. The
@@ -674,7 +675,7 @@ bool M2tsPacketizer::scanPsi(QString* error) {
                                    : index < maxPacketsToScan;
     };
     for (int index = 0; inWindow(index) && !psiComplete(); ++index) {
-        const QByteArray sourcePacket = m_device->read(m_packetSize);
+        const QByteArray sourcePacket = readSourcePacket();
         if (sourcePacket.size() != m_packetSize) {
             break;
         }
@@ -1464,7 +1465,7 @@ QByteArray M2tsPacketizer::nextSourcePacket(std::uint64_t* offset) {
         packet = m_prebuffer.mid(m_prebufferPos, m_packetSize);
         m_prebufferPos += m_packetSize;
     } else {
-        packet = m_device->read(m_packetSize);
+        packet = readSourcePacket();
     }
     *offset = m_sourceOffset;
     m_sourceOffset += static_cast<std::uint64_t>(packet.size());
@@ -1573,12 +1574,12 @@ QByteArray M2tsPacketizer::lookAheadPacket(qsizetype offset) {
     // Timed windows keep no packet: each scan reads on from where the last
     // one stopped, and the track starts at the next random access point.
     if (m_timedStartWindows) {
-        const QByteArray packet = m_device->read(m_packetSize);
+        const QByteArray packet = readSourcePacket();
         m_sourceOffset += static_cast<std::uint64_t>(packet.size());
         return packet;
     }
     while (offset + m_packetSize > m_prebuffer.size()) {
-        const QByteArray packet = m_device->read(m_packetSize);
+        const QByteArray packet = readSourcePacket();
         if (packet.size() != m_packetSize) {
             return {};
         }
@@ -1776,6 +1777,23 @@ bool M2tsPacketizer::patRestartRequested() const {
 
 std::shared_ptr<QIODevice> M2tsPacketizer::device() const {
     return m_device;
+}
+
+void M2tsPacketizer::continueFrom(const M2tsPacketizer& previous) {
+    m_packetSize = previous.m_packetSize;
+    // m_sourceOffset counts the packets taken from the prebuffer, so it is
+    // the offset of the first unread one.
+    m_sourceOffset = previous.m_sourceOffset;
+    m_unread = previous.m_prebuffer.mid(previous.m_prebufferPos) + previous.m_unread.mid(previous.m_unreadPos);
+}
+
+QByteArray M2tsPacketizer::readSourcePacket() {
+    if (m_unreadPos < m_unread.size()) {
+        const QByteArray packet = m_unread.mid(m_unreadPos, m_packetSize);
+        m_unreadPos += m_packetSize;
+        return packet;
+    }
+    return m_device->read(m_packetSize);
 }
 
 bool M2tsPacketizer::hasVideo() const {
