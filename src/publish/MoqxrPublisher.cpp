@@ -354,6 +354,11 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
             openmoq::publisher::transport::TlsConfig tls;
             tls.insecure_skip_verify = cfg.insecure;
             const auto status = activePublisher->publish_live_objects(source, parseEndpoint(cfg.moqEndpoint), tls, false);
+            // Every connection that carried Objects counts, also one that a
+            // PAT change ends without a failure.
+            if (state->objects.load(std::memory_order_acquire) - objectsAtStart > 1) {
+                m_reconnectPolicy.worked();
+            }
             // A stop request: running turned false, or stop() ended the publish.
             // The CLI stops the publisher before the pipeline on SIGINT/SIGTERM,
             // so running can still be true here after an interrupt.
@@ -377,8 +382,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                 using openmoq::publisher::transport::FailureKind;
                 const bool permanent = status.failure_kind == FailureKind::kFatal ||
                                        status.failure_kind == FailureKind::kEndpointPermanent;
-                const bool established = state->objects.load(std::memory_order_acquire) - objectsAtStart > 1;
-                const std::optional<std::chrono::seconds> delay = m_reconnectPolicy.nextDelay(permanent, established);
+                const std::optional<std::chrono::seconds> delay = m_reconnectPolicy.nextDelay(permanent);
                 if (!delay) {
                     emit publishError(permanent ? QString::fromStdString(status.message)
                                                 : giveUpReason(QString::fromStdString(status.message)));
@@ -422,8 +426,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                          stats.last_error.empty() ? "" : "; last error: ", stats.last_error.c_str());
                 // The relay closed the session without an error.
                 if (mayReconnect && status.ok) {
-                    const bool established = state->objects.load(std::memory_order_acquire) - objectsAtStart > 1;
-                    const std::optional<std::chrono::seconds> delay = m_reconnectPolicy.nextDelay(false, established);
+                    const std::optional<std::chrono::seconds> delay = m_reconnectPolicy.nextDelay(false);
                     if (!delay) {
                         emit publishError(giveUpReason(unexpectedEnd));
                         return false;

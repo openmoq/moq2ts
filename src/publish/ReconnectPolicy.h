@@ -19,15 +19,17 @@ class ReconnectPolicy {
 public:
     static constexpr int kMaxFailedAttempts = 10;
 
+    // A connection carried Objects: the bound no longer applies, and the
+    // next wait starts again at 2 s.
+    void worked() {
+        m_worked = true;
+        m_failedAttempts = 0;
+    }
+
     // The wait before the next attempt, or none when the publish ends.
-    // established: the failed connection had carried Objects.
-    std::optional<std::chrono::seconds> nextDelay(bool permanent, bool established) {
+    std::optional<std::chrono::seconds> nextDelay(bool permanent) {
         if (permanent) {
             return std::nullopt;
-        }
-        if (established) {
-            m_worked = true;
-            m_failedAttempts = 0;
         }
         ++m_failedAttempts;
         if (!m_worked && m_failedAttempts >= kMaxFailedAttempts) {
