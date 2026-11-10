@@ -340,7 +340,8 @@ int main(int argc, char** argv) {
                        "CA bundle.")));
     parser.addOption(QCommandLineOption(QStringLiteral("no-reconnect"),
         QStringLiteral("Exit when the relay connection ends. By default a live publish connects to the relay "
-                       "again, with a backoff of 1 s up to 30 s, and goes on from the next Group.")));
+                       "again after 2 s, then 2 s longer after each failed attempt up to 60 s, and goes on from the next "
+                       "Group.")));
     addValue(QStringLiteral("accessible-window"),
              QStringLiteral("Live sources: the window in seconds that the media timeline covers. The catalog declares it as "
                             "accessibleWindowTime and the timeline track keeps the records inside it, so that it stops "
