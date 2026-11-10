@@ -254,6 +254,16 @@ private:
     // Before the first Object: when the source already skipped ahead, drop
     // what came before the gap, so that the track starts at the live edge.
     void skipToFirstGap();
+    // Sets the group PID, whose random_access_indicator starts Groups, and
+    // the PID of timed Groups.
+    void setGroupPid(int pid);
+    // True while Groups can start on time: before the first random access
+    // point, and 10 s after the last one on a track that does not declare
+    // mpeg2tsRandomAccess.
+    bool timedGroupsActive();
+    // The PCR time since start, -1 before a PCR. A start of -1 takes the
+    // latest PCR.
+    std::int64_t pcrSince(std::int64_t& start);
     // After a gap, the PSI sections in progress and the Group timing restart,
     // and per-program carriage drops to the next random access point. It
     // marks the PCR discontinuity when a published Group precedes the gap
@@ -293,6 +303,7 @@ private:
     int m_patProgramCount = 0;
     // First video elementary PID of the PMT; the PTS source for Object media time.
     int m_videoPid = -1;
+    int m_audioPid = -1;   // the first audio stream in the PMT
     PtsUnwrapper m_ptsUnwrapper;
 
     // Current PSI of the source: the last PAT, the last PMT of the selected
@@ -361,6 +372,8 @@ private:
     // Group; MOQT makes the start of a Group the join point). Only until the
     // first random access point.
     std::int64_t m_lastPcr27 = -1;        // the latest PCR of the PCR PID
+    std::int64_t m_lastRapPcr27 = -1;     // the PCR at the last random access point
+    bool m_lastStartTimed = false;        // the last Group started on time
     std::int64_t m_groupStartPcr27 = -1;  // the PCR when the current Group started
     bool m_groupStartsTimed = false;      // the next Object starts a Group on time
     bool m_carryTimed = false;            // m_carryPacket waits for a Group on time
@@ -372,6 +385,8 @@ private:
     // wait for the PMT of a new reference program, and latch on nothing.
     static constexpr int kAwaitingPmt = -2;
     int m_rapPid = -1;
+    // The PID whose PES starts open timed Groups (see setGroupPid).
+    int m_timedPid = -1;
 
     // Carriage-profile state (msfts#7).
     bool m_transparent = false;
