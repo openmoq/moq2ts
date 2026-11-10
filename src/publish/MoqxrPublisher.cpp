@@ -259,7 +259,6 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
             QMutexLocker locker(&m_mutex);
             return !m_connected;
         };
-        ReconnectPolicy retries;
 
         for (;;) {
             openmoq::publisher::LiveObjectSource source;
@@ -379,13 +378,13 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                 const bool permanent = status.failure_kind == FailureKind::kFatal ||
                                        status.failure_kind == FailureKind::kEndpointPermanent;
                 const bool established = state->objects.load(std::memory_order_acquire) - objectsAtStart > 1;
-                const std::optional<std::chrono::seconds> delay = retries.nextDelay(permanent, established);
+                const std::optional<std::chrono::seconds> delay = m_reconnectPolicy.nextDelay(permanent, established);
                 if (!delay) {
                     emit publishError(permanent ? QString::fromStdString(status.message)
                                                 : giveUpReason(QString::fromStdString(status.message)));
                     return false;
                 }
-                if (!prepareReconnect(*state, QString::fromStdString(status.message), retries.failedAttempts(), *delay,
+                if (!prepareReconnect(*state, QString::fromStdString(status.message), m_reconnectPolicy.failedAttempts(), *delay,
                                       running, isStopped)) {
                     return true;   // stopped while waiting
                 }
@@ -424,12 +423,12 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                 // The relay closed the session without an error.
                 if (mayReconnect && status.ok) {
                     const bool established = state->objects.load(std::memory_order_acquire) - objectsAtStart > 1;
-                    const std::optional<std::chrono::seconds> delay = retries.nextDelay(false, established);
+                    const std::optional<std::chrono::seconds> delay = m_reconnectPolicy.nextDelay(false, established);
                     if (!delay) {
                         emit publishError(giveUpReason(unexpectedEnd));
                         return false;
                     }
-                    if (!prepareReconnect(*state, unexpectedEnd, retries.failedAttempts(), *delay, running,
+                    if (!prepareReconnect(*state, unexpectedEnd, m_reconnectPolicy.failedAttempts(), *delay, running,
                                           isStopped)) {
                         return true;   // stopped while waiting
                     }

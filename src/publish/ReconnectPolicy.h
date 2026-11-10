@@ -14,7 +14,7 @@ namespace moq2ts {
 // non-zero: the waits add up to 90 s, plus the time each attempt takes to fail
 // (up to about 16 s for a relay that never answers). After a working
 // connection, a relay outage is transient, so the publish retries for as long
-// as it lasts, as an SRT caller does.
+// as it lasts.
 class ReconnectPolicy {
 public:
     static constexpr int kMaxFailedAttempts = 10;
