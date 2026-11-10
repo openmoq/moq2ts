@@ -53,8 +53,10 @@ int main() {
         int listenSock = -1;
         const QString err = SrtSource::listen(cfg, listenSock);
         int fds[2] = {-1, -1};
-        if (expect(err.isEmpty(), "listen on 127.0.0.1:19874 failed (port busy?): " + err.toStdString()) &&
-            expect(::pipe(fds) == 0, "pipe")) {
+        ok &= expect(err.isEmpty(), "listen on 127.0.0.1:19874 failed (port busy?): " + err.toStdString());
+        const bool piped = ::pipe(fds) == 0;
+        ok &= expect(piped, "pipe");
+        if (err.isEmpty() && piped) {
             std::atomic<bool> stop{false};
             SrtSource::LinkStatsSnapshot silent;
             std::thread loop([&] { SrtSource::listenLoop(listenSock, fds[1], stop, nullptr, nullptr, &silent); });
