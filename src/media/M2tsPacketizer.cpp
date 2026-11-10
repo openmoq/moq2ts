@@ -255,8 +255,8 @@ bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryP
         const int esInfoLength = ((static_cast<unsigned char>(section[offset + 3]) & 0x0f) << 8) |
                                  static_cast<unsigned char>(section[offset + 4]);
         elementaryPids->insert(elementaryPid);
-        readCaDescriptors(section, offset + 5, std::min(offset + 5 + esInfoLength, sectionEnd), ecmPids, caSystems);
         const int esInfoEnd = std::min(offset + 5 + esInfoLength, sectionEnd);
+        readCaDescriptors(section, offset + 5, esInfoEnd, ecmPids, caSystems);
         if (*audioPid < 0 && (isAudioStreamType(streamType) ||
                               (streamType == 0x06 && hasDvbAudioDescriptor(section, offset + 5, esInfoEnd)))) {
             *audioPid = elementaryPid;
@@ -1295,7 +1295,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         // keeps its buffer: not after the PAT rewrite below replaces it.
         const QByteArray tsView = QByteArray::fromRawData(packet.constData() + (m_packetSize == 192 ? 4 : 0), 188);
         const int pid = pidOf(tsView);
-        if (pid == m_pcrPid && m_pcrPid >= 0 && (!m_sawFirstRap || !randomAccess())) {
+        if (pid == m_pcrPid && (!m_sawFirstRap || !randomAccess())) {
             const std::int64_t pcr = pcrOf(tsView);
             if (pcr >= 0) {
                 m_lastPcr27 = pcr;
@@ -1462,8 +1462,6 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     }
     if (timedStart || rapDetected) {
         m_lastStartTimed = timedStart && !rapDetected;
-    }
-    if (timedStart || rapDetected) {
         m_groupStartPcr27 = m_lastPcr27;
     }
     if (rapDetected) {
