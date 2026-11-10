@@ -326,9 +326,8 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                     if (track == kCatalogTrackName) {
                         // A reconnection sends this one first.
                         state->catalog = current.payload;
-                        m_lastCatalogGroup = nextCatalogGroup(
-                            m_lastCatalogGroup, static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch()));
-                        wireGroupId = m_lastCatalogGroup;
+                        // The connection's first Object set m_lastCatalogGroup.
+                        wireGroupId = ++m_lastCatalogGroup;
                     }
                     const int64_t objects = state->objects.fetch_add(1, std::memory_order_acq_rel) + 1;
                     const int64_t bytes = state->bytes.fetch_add(current.payload.size(), std::memory_order_acq_rel) +
