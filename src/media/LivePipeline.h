@@ -69,11 +69,11 @@ struct PublishState {
 
 // Adds the record of a media Group to history and returns Object 0 of the
 // timeline Group of the same number, which holds every accessible record (MSF
-// -01 Section 7.3). Records added more than windowMs of steadyUs before the
-// newest one are dropped, as the editor's copy of MSF asks publishers to trim
-// the timeline to the accessibleWindowTime; 0 keeps every record. The Object names the media
-// track as its afterTrack, so the publisher sends it after the media Object it
-// records.
+// -01 Section 7.3). Records added more than windowMs before the newest one,
+// on the steady clock (steadyUs), are dropped: the editor's copy of MSF asks
+// to trim the timeline to the accessibleWindowTime. 0 keeps every record. The
+// Object names the media track as its afterTrack, so the publisher sends it
+// after the media Object it records.
 PublishedObject timelineObject(TimelineHistory* history,
                                const QString& timelineTrackName,
                                const PublishedObject& media,
