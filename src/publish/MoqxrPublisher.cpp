@@ -1,6 +1,7 @@
 #include "MoqxrPublisher.h"
 #include "ObjectLookahead.h"
 
+#include <QDateTime>
 #include <QDebug>
 #include <QMutexLocker>
 #include <QThread>
@@ -111,9 +112,8 @@ struct LiveResumeState {
     std::atomic<bool> sourceEnded{false};
     std::atomic<int64_t> objects{0};
     std::atomic<int64_t> bytes{0};
-    // The latest catalog, with its Group, which every connection sends first.
+    // The latest catalog, which every connection sends first.
     QByteArray catalog;
-    std::size_t catalogGroup = 0;
     // The highest Group of each track that was handed to moqxr.
     std::map<std::string, std::size_t> highestGroup;
     // After a reconnection: Objects of these Groups and earlier are dropped.
@@ -287,9 +287,11 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                     const int64_t bytes = state->bytes.fetch_add(state->catalog.size(), std::memory_order_acq_rel) +
                                           state->catalog.size();
                     emit framePublished(QStringLiteral("catalog"), bytes, objects);
+                    m_lastCatalogGroup = nextCatalogGroup(
+                        m_lastCatalogGroup, static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch()));
                     return openmoq::publisher::LiveObject{
                         .track_name = kCatalogTrackName,
-                        .group_id = state->catalogGroup,
+                        .group_id = m_lastCatalogGroup,
                         .subgroup_id = 0,
                         .object_id = 0,
                         .media_time_us = 0,
@@ -318,10 +320,14 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                     }
                     std::size_t& highest = state->highestGroup[track];
                     highest = std::max(highest, groupId);
+                    // The pipeline numbers catalog Groups from 0 in each
+                    // session; on the wire they follow the connection's first.
+                    std::size_t wireGroupId = groupId;
                     if (track == kCatalogTrackName) {
                         // A reconnection sends this one first.
                         state->catalog = current.payload;
-                        state->catalogGroup = groupId;
+                        // The connection's first Object set m_lastCatalogGroup.
+                        wireGroupId = ++m_lastCatalogGroup;
                     }
                     const int64_t objects = state->objects.fetch_add(1, std::memory_order_acq_rel) + 1;
                     const int64_t bytes = state->bytes.fetch_add(current.payload.size(), std::memory_order_acq_rel) +
@@ -330,7 +336,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
 
                     return openmoq::publisher::LiveObject{
                         .track_name = track,
-                        .group_id = groupId,
+                        .group_id = wireGroupId,
                         // One subgroup per Group: see subgroup_contains_group_largest.
                         .subgroup_id = 0,
                         .object_id = static_cast<std::size_t>(current.objectId),
@@ -536,6 +542,10 @@ std::chrono::seconds MoqxrPublisher::subscriberTimeout(bool liveSource) {
         return std::chrono::seconds(120);
     }
     return awaitsSubscriberIndefinitely() ? std::chrono::seconds(30) : std::chrono::hours(24 * 365 * 10);
+}
+
+std::uint64_t MoqxrPublisher::nextCatalogGroup(std::uint64_t lastGroup, std::uint64_t nowMs) {
+    return lastGroup == 0 ? nowMs : lastGroup + 1;
 }
 
 QString MoqxrPublisher::unexpectedEndReason(bool liveSource, bool running, bool publisherStopped, bool sourceEnded) {

@@ -105,5 +105,17 @@ int main() {
         check(mock.finalFields() == "pulled_objects=4 pulled_bytes=310 sent_objects=4 sent_bytes=310",
               "the mock reports what it sent: " + mock.finalFields().toStdString());
     }
+    // MSF -01 Section 6.1: after a restart, the catalog starts above every
+    // Group published before. The wallclock in ms starts it above the Groups
+    // of an earlier process.
+    {
+        using moq2ts::MoqxrPublisher;
+        constexpr std::uint64_t now = 1'762'000'000'000;
+        check(MoqxrPublisher::nextCatalogGroup(0, now) == now, "the first catalog of a process is the wallclock");
+        check(MoqxrPublisher::nextCatalogGroup(now, now + 60'000) == now + 1,
+              "a later catalog, after a reconnection too, takes the next Group");
+        check(MoqxrPublisher::nextCatalogGroup(now + 5, now) == now + 6,
+              "a clock step back does not reuse a Group");
+    }
     return ok ? 0 : 1;
 }
