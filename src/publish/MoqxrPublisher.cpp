@@ -248,28 +248,6 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
         publisherConfig.paced = false;
         publisherConfig.loop = false;
         publisherConfig.subscriber_timeout = subscriberTimeout(cfg.liveSource);
-        // The setup token, opaque here: moqxr sends it as the relay's token
-        // type. The file is read again at each publish, so that a rotated
-        // token takes effect. Errors name the file, never the token.
-        QByteArray token = cfg.authToken;
-        if (!cfg.authTokenFile.isEmpty()) {
-            QFile file(cfg.authTokenFile);
-            if (!file.open(QIODevice::ReadOnly)) {
-                emit publishError(QStringLiteral("Cannot read the authorization token file %1: %2")
-                                      .arg(cfg.authTokenFile, file.errorString()));
-                return false;
-            }
-            token = file.readAll();
-        }
-        if (!token.isEmpty()) {
-            namespace cat4moq = openmoq::publisher::cat4moq;
-            const auto* bytes = reinterpret_cast<const std::uint8_t*>(token.constData());
-            publisherConfig.authorization.setup_credential = cat4moq::Credential{
-                .cwt = cat4moq::decode_credential_bytes({bytes, static_cast<std::size_t>(token.size())}),
-                .profile = cat4moq::Profile::kMoqxCompat,
-                .token_type = cfg.authTokenType,
-            };
-        }
         setAwaitSubscriberIndefinitely(publisherConfig, cfg.liveSource);
 
         // What outlives one connection: the source of Objects, the totals, and
@@ -371,6 +349,37 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                 }
             };
 
+            // The setup token, opaque here: moqxr sends it as the relay's
+            // token type. The file is read at each connection, so that a
+            // rotated token takes effect. A token that cannot be used ends the
+            // publish, and the error names its source, never the token.
+            if (!cfg.authToken.isEmpty() || !cfg.authTokenFile.isEmpty()) {
+                const QString source = cfg.authTokenFile.isEmpty() ? QStringLiteral("relay.auth_token")
+                                                                   : cfg.authTokenFile;
+                QByteArray token = cfg.authToken;
+                if (!cfg.authTokenFile.isEmpty()) {
+                    QFile file(cfg.authTokenFile);
+                    if (!file.open(QIODevice::ReadOnly)) {
+                        emit publishError(QStringLiteral("Cannot read the authorization token file %1: %2")
+                                              .arg(source, file.errorString()));
+                        return false;
+                    }
+                    token = file.readAll();
+                }
+                namespace cat4moq = openmoq::publisher::cat4moq;
+                try {
+                    const auto* bytes = reinterpret_cast<const std::uint8_t*>(token.constData());
+                    publisherConfig.authorization.setup_credential = cat4moq::Credential{
+                        .cwt = cat4moq::decode_credential_bytes({bytes, static_cast<std::size_t>(token.size())}),
+                        .profile = cat4moq::Profile::kMoqxCompat,
+                        .token_type = cfg.authTokenType,
+                    };
+                } catch (const std::exception& error) {
+                    emit publishError(QStringLiteral("The authorization token in %1 cannot be used: %2")
+                                          .arg(source, QString::fromUtf8(error.what())));
+                    return false;
+                }
+            }
             auto activePublisher = std::make_shared<openmoq::publisher::Publisher>(publisherConfig);
             {
                 QMutexLocker locker(&m_mutex);

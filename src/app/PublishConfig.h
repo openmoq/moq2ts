@@ -17,6 +17,9 @@ enum class AudioCodecPreset {
     Opus,
 };
 
+// The largest token type: a MOQT integer holds at most 2^62 - 1.
+inline constexpr qint64 kMaxAuthTokenType = (qint64{1} << 62) - 1;
+
 struct PublishConfig {
     QString moqEndpoint = "mock://local";
     QString namespaceName = "live/paul1";

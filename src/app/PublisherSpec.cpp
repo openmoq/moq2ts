@@ -131,7 +131,7 @@ bool readRelay(const QJsonObject& root, PublishConfig* relay, QString* error) {
     if (!readString(object, QStringLiteral("auth_token_file"), QStringLiteral("relay.auth_token_file"), false,
                     &relay->authTokenFile, error) ||
         !readInt(object, QStringLiteral("auth_token_type"), QStringLiteral("relay.auth_token_type"), 0,
-                 std::numeric_limits<qint64>::max(), false, &tokenType, error)) {
+                 kMaxAuthTokenType, false, &tokenType, error)) {
         return false;
     }
     relay->authTokenType = static_cast<quint64>(tokenType);

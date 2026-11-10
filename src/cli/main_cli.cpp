@@ -427,8 +427,8 @@ int main(int argc, char** argv) {
     {
         bool typeOk = false;
         cfg.authTokenType = parser.value(QStringLiteral("auth-token-type")).toULongLong(&typeOk);
-        if (!typeOk) {
-            logLine(stderr, "error", QStringLiteral("--auth-token-type must be a non-negative integer."));
+        if (!typeOk || cfg.authTokenType > static_cast<quint64>(moq2ts::kMaxAuthTokenType)) {
+            logLine(stderr, "error", QStringLiteral("--auth-token-type must be an integer from 0 to 2^62 - 1."));
             return 2;
         }
     }
