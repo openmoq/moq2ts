@@ -99,6 +99,14 @@ while nobody subscribes, and are `unknown` after a failed publish. The
 single-source path also prints the media totals `objects`, `bytes`, and
 `groups` first.
 
+While it publishes, the single-source path prints a `[stats]` line about once
+per second with the same media totals. With an SRT source, the line adds the
+health of the SRT link as libsrt counts it since the connection started:
+`srt_rtt_ms` (round-trip time), `srt_recv` (packets received), `srt_lost`
+(packets found missing), `srt_retrans` (packets received again), `srt_drop`
+(packets that came too late to play, a hole in the output), and `srt_buf_ms`
+(media held in the receive buffer, to compare with the SRT latency).
+
 ## Run: seekable file
 
 ```bash
