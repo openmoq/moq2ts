@@ -6,15 +6,15 @@
 
 namespace moq2ts {
 
-// When a live publish connects to the relay again after a failure. A
-// permanent failure (moqxr's kFatal or kEndpointPermanent, such as a rejected
-// publish) ends it at once. Otherwise it waits 2 s, then 2 s more after each
-// failed attempt, up to 60 s. Until a connection has carried Objects, it tries
-// at most kMaxFailedAttempts times, so that a configuration error exits
+// When a live publish connects to the relay again after a failure. It waits
+// 2 s, then 2 s more after each failed attempt, up to 60 s. Until a connection
+// has carried Objects, a permanent failure (moqxr's kFatal or
+// kEndpointPermanent, such as a rejected publish) ends it at once, and it
+// tries at most kMaxFailedAttempts times, so that a configuration error exits
 // non-zero: the waits add up to 90 s, plus the time each attempt takes to fail
 // (up to about 16 s for a relay that never answers). After a working
-// connection, a relay outage is transient, so the publish retries for as long
-// as it lasts.
+// connection, every failure, a permanent one too, is retried for as long as
+// it lasts.
 class ReconnectPolicy {
 public:
     static constexpr int kMaxFailedAttempts = 10;
@@ -28,7 +28,7 @@ public:
 
     // The wait before the next attempt, or none when the publish ends.
     std::optional<std::chrono::seconds> nextDelay(bool permanent) {
-        if (permanent) {
+        if (permanent && !m_worked) {
             return std::nullopt;
         }
         ++m_failedAttempts;

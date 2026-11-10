@@ -51,14 +51,15 @@ bool retriesWithoutLimitAfterAWorkingConnection() {
     return ok;
 }
 
-// A permanent failure ends the publish at once, on the first connection or
-// after a working one.
-bool stopsOnAPermanentFailure() {
+// A permanent failure ends the publish at once before any connection worked.
+// After a working connection, it follows the schedule like any other.
+bool permanentOnlyAtStartup() {
     ReconnectPolicy first;
-    bool ok = expect(!first.nextDelay(true), "a permanent failure of the first connection ends the publish");
+    bool ok = expect(!first.nextDelay(true), "a permanent failure before any working connection ends the publish");
     ReconnectPolicy later;
     later.worked();
-    ok &= expect(!later.nextDelay(true), "a permanent failure after a working connection ends the publish");
+    ok &= expect(later.nextDelay(true) == seconds(2), "a permanent failure after a working connection waits 2 s");
+    ok &= expect(later.nextDelay(true) == seconds(4), "and keeps the schedule");
     return ok;
 }
 } // namespace
@@ -67,7 +68,7 @@ int main() {
     bool ok = true;
     ok &= firstConnectionIsBounded();
     ok &= retriesWithoutLimitAfterAWorkingConnection();
-    ok &= stopsOnAPermanentFailure();
+    ok &= permanentOnlyAtStartup();
     if (!ok) {
         return 1;
     }

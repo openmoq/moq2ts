@@ -388,6 +388,12 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                                                 : giveUpReason(QString::fromStdString(status.message)));
                     return false;
                 }
+                if (permanent) {
+                    // After a working session: monitoring can alarm on this.
+                    qCritical("The relay connection failed with a permanent error (%s): %s.",
+                              status.failure_kind == FailureKind::kFatal ? "kFatal" : "kEndpointPermanent",
+                              status.message.c_str());
+                }
                 if (!prepareReconnect(*state, QString::fromStdString(status.message), m_reconnectPolicy.failedAttempts(), *delay,
                                       running, isStopped)) {
                     return true;   // stopped while waiting
