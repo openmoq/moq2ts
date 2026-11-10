@@ -105,7 +105,7 @@ public:
     // The read end of the pipe, as a path the pipeline opens.
     QString readPath() const { return QStringLiteral("/dev/fd/%1").arg(m_readFd); }
 
-    // The latest SRT link figures, none before the first connection.
+    // The SRT link figures of the current connection, none without one.
     std::optional<moq2ts::SrtSource::LinkStats> linkStats() const { return m_linkStats.load(); }
 
     void stop() {
@@ -640,25 +640,30 @@ int main(int argc, char** argv) {
     // Throttle stats to roughly one line per second to keep server logs readable.
     auto* statsClock = new QElapsedTimer();
     statsClock->start();
-    // An SRT source adds the health of its link, as libsrt last counted it.
     QObject::connect(&pipeline, &moq2ts::LivePipeline::stats, &app,
-                     [&, statsClock](int64_t objects, int64_t bytes, int64_t groups) {
+                     [statsClock](int64_t objects, int64_t bytes, int64_t groups) {
                          if (statsClock->elapsed() < 1000) {
                              return;
                          }
                          statsClock->restart();
-                         QString line = QStringLiteral("[stats] objects=%1 bytes=%2 groups=%3")
-                                            .arg(objects)
-                                            .arg(bytes)
-                                            .arg(groups);
-#ifdef MOQ2TS_HAS_SRT
-                         if (const auto link = srtIngest.linkStats()) {
-                             line += QLatin1Char(' ') + moq2ts::SrtSource::formatLinkStats(*link);
-                         }
-#endif
-                         std::fprintf(stdout, "%s\n", qUtf8Printable(line));
+                         std::fprintf(stdout, "[stats] objects=%lld bytes=%lld groups=%lld\n",
+                                      static_cast<long long>(objects), static_cast<long long>(bytes),
+                                      static_cast<long long>(groups));
                          std::fflush(stdout);
                      });
+#ifdef MOQ2TS_HAS_SRT
+    // The health of the SRT link, once per second, also while no Object flows.
+    QTimer srtStats;
+    QObject::connect(&srtStats, &QTimer::timeout, &app, [&srtIngest] {
+        const auto link = srtIngest.linkStats();
+        std::fprintf(stdout, "[srt] %s\n",
+                     link ? qUtf8Printable(moq2ts::SrtSource::formatLinkStats(*link)) : "not connected");
+        std::fflush(stdout);
+    });
+    if (useSrt) {
+        srtStats.start(1000);
+    }
+#endif
 
     if (!publisher.connect(cfg)) {
         logLine(stderr, "error", QStringLiteral("Could not open MOQ publish session."));

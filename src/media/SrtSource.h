@@ -52,8 +52,8 @@ public:
         std::int64_t bufferMs = 0;       // media held in the receive buffer
     };
 
-    /// The latest LinkStats: the receive loop stores them once per second,
-    /// and any thread reads them.
+    /// The latest LinkStats: the receive loop stores them once per second and
+    /// clears them when its connection ends, and any thread reads them.
     class LinkStatsSnapshot {
     public:
         void store(const LinkStats& stats) {
@@ -64,13 +64,17 @@ public:
             std::lock_guard<std::mutex> lock(m_mutex);
             return m_stats;
         }
+        void clear() {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_stats.reset();
+        }
 
     private:
         mutable std::mutex m_mutex;
         std::optional<LinkStats> m_stats;
     };
 
-    /// The link figures as the [stats] line shows them.
+    /// The link figures as the [srt] line shows them.
     static QString formatLinkStats(const LinkStats& stats);
 
     /// Opens an SRT caller connection to host:port. Blocks until connected or error.

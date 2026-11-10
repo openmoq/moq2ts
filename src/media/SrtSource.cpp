@@ -135,7 +135,7 @@ QString SrtSource::listen(const Config& cfg, int& listenSockOut) {
 }
 
 QString SrtSource::formatLinkStats(const LinkStats& stats) {
-    return QStringLiteral("srt_rtt_ms=%1 srt_recv=%2 srt_lost=%3 srt_retrans=%4 srt_drop=%5 srt_buf_ms=%6")
+    return QStringLiteral("rtt_ms=%1 recv=%2 lost=%3 retrans=%4 drop=%5 buf_ms=%6")
         .arg(stats.rttMs, 0, 'f', 1)
         .arg(stats.received)
         .arg(stats.lost)
@@ -186,6 +186,16 @@ void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequest
     std::uint64_t reportedDrops = 0;
     auto lastDropLog = std::chrono::steady_clock::now() - std::chrono::hours(1);
     auto lastStatsLog = lastDropLog;
+    auto lastLossLog = lastDropLog;
+    // The figures describe this connection only.
+    struct ClearOnReturn {
+        LinkStatsSnapshot* stats;
+        ~ClearOnReturn() {
+            if (stats != nullptr) {
+                stats->clear();
+            }
+        }
+    } clearOnReturn{linkStats};
     int64_t lastRcvDrop = 0;
     int64_t lastRcvLoss = 0;
     char buf[kBufSize];
@@ -280,6 +290,38 @@ void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequest
     while (!stopRequested.load(std::memory_order_acquire)) {
         drainToPipe();
 
+        // SRT's own receive-side counters, read once per second, data or not:
+        // a silent source is when they matter most. They are also the only
+        // way to see packets SRT discarded because they missed the latency
+        // budget (TLPKTDROP); such loss is invisible to every check downstream
+        // of here.
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastStatsLog >= std::chrono::seconds(1)) {
+            lastStatsLog = now;
+            SRT_TRACEBSTATS st{};
+            if (srt_bstats(sock, &st, 0) == 0) {
+                if (linkStats != nullptr) {
+                    linkStats->store({.rttMs = st.msRTT,
+                                      .received = st.pktRecvTotal,
+                                      .lost = st.pktRcvLossTotal,
+                                      .retransmitted = st.pktRcvRetrans,
+                                      .dropped = st.pktRcvDropTotal,
+                                      .bufferMs = st.msRcvBuf});
+                }
+                if ((st.pktRcvDropTotal != lastRcvDrop || st.pktRcvLossTotal != lastRcvLoss) &&
+                    now - lastLossLog >= std::chrono::seconds(2)) {
+                    lastLossLog = now;
+                    qWarning() << "[SRT] receiver loss: dropped(TLPKTDROP)="
+                               << st.pktRcvDropTotal << "(+" << (st.pktRcvDropTotal - lastRcvDrop)
+                               << ") lost=" << st.pktRcvLossTotal
+                               << "(+" << (st.pktRcvLossTotal - lastRcvLoss)
+                               << ") retrans=" << st.pktRetransTotal;
+                    lastRcvDrop = st.pktRcvDropTotal;
+                    lastRcvLoss = st.pktRcvLossTotal;
+                }
+            }
+        }
+
         SRTSOCKET ready[1];
         int readyCount = 1;
         if (srt_epoll_wait(eid, ready, &readyCount, nullptr, nullptr, kRecvPollMs, nullptr, nullptr, nullptr,
@@ -323,41 +365,12 @@ void SrtSource::receiveLoop(int sock, int pipeFd, std::atomic<bool>& stopRequest
         // only per buffer's-worth hid small drops entirely, which made a real media
         // gap look like it had no local cause.
         const std::uint64_t dropped = ring.droppedBytes();
-        const auto now = std::chrono::steady_clock::now();
         if (dropped > reportedDrops && now - lastDropLog >= std::chrono::seconds(2)) {
             qWarning() << "[SRT] ring dropped" << (dropped - reportedDrops)
                        << "bytes (total" << dropped << ") - consumer behind; the published stream has a gap "
                           "and will try to resume at a random access point";
             reportedDrops = dropped;
             lastDropLog = now;
-        }
-
-        // SRT's own receive-side counters, read once per second. They are the
-        // only way to see packets SRT discarded because they missed the
-        // latency budget (TLPKTDROP); such loss is invisible to every check
-        // downstream of here.
-        if (now - lastStatsLog >= std::chrono::seconds(1)) {
-            lastStatsLog = now;
-            SRT_TRACEBSTATS st{};
-            if (srt_bstats(sock, &st, 0) == 0) {
-                if (linkStats != nullptr) {
-                    linkStats->store({.rttMs = st.msRTT,
-                                      .received = st.pktRecvTotal,
-                                      .lost = st.pktRcvLossTotal,
-                                      .retransmitted = st.pktRcvRetrans,
-                                      .dropped = st.pktRcvDropTotal,
-                                      .bufferMs = st.msRcvBuf});
-                }
-                if (st.pktRcvDropTotal != lastRcvDrop || st.pktRcvLossTotal != lastRcvLoss) {
-                    qWarning() << "[SRT] receiver loss: dropped(TLPKTDROP)="
-                               << st.pktRcvDropTotal << "(+" << (st.pktRcvDropTotal - lastRcvDrop)
-                               << ") lost=" << st.pktRcvLossTotal
-                               << "(+" << (st.pktRcvLossTotal - lastRcvLoss)
-                               << ") retrans=" << st.pktRetransTotal;
-                    lastRcvDrop = st.pktRcvDropTotal;
-                    lastRcvLoss = st.pktRcvLossTotal;
-                }
-            }
         }
     }
 }
