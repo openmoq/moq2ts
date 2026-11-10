@@ -1613,7 +1613,8 @@ int main() {
     // Timed Groups for the sources that #40 left in Group 0 (#49), on 20 s of
     // a live source (the PCR advances 0.1 s per round):
     // - audio: an audio-only program whose PCR travels on a PID of its own.
-    //   Groups start at a PES start of the audio PID about every 2 s.
+    //   Groups start at a PES start of the audio PID about every 2 s, also
+    //   when the PMT lists an SCTE-35 PID before it.
     // - single RAP: a video source that sets the indicator once, on an
     //   unmodified track with source gaps, as SRT ingest runs. Groups resume
     //   10 s after it, then come every 2 s.
@@ -1628,16 +1629,20 @@ int main() {
         int minStarts;
         int maxStarts;
     };
-    for (const TimedCase& test : {TimedCase{"audio", 0, false, 9, 11}, TimedCase{"single RAP", -1, true, 5, 6},
+    for (const TimedCase& test : {TimedCase{"audio", 0, false, 9, 11}, TimedCase{"audio after SCTE-35", 0, false, 9, 11},
+                                  TimedCase{"single RAP", -1, true, 5, 6},
                                   TimedCase{"normal GOP", 30, true, 7, 7}, TimedCase{"declared", -1, false, 1, 1}}) {
         const std::string label = test.kind + ": ";
-        const bool audio = test.kind == "audio";
+        const bool audio = test.kind.rfind("audio", 0) == 0;
+        const QList<std::pair<int, int>> audioStreams =
+            test.kind == "audio" ? QList<std::pair<int, int>>{{0x0F, 0x101}}
+                                 : QList<std::pair<int, int>>{{0x86, 0x102}, {0x0F, 0x101}};
         const int groupPid = audio ? 0x101 : 0x100;
         QByteArray ts;
         int cc = 0;
         for (int round = 0; round < 200; ++round) {
             ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}), round & 0x0F);
-            ts += audio ? tb::psiPacket(0x1000, tb::pmtSection(1, 0x1FF, {{0x0F, 0x101}}), round & 0x0F)
+            ts += audio ? tb::psiPacket(0x1000, tb::pmtSection(1, 0x1FF, audioStreams), round & 0x0F)
                         : tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}), round & 0x0F);
             ts += pcrPacket(audio ? 0x1FF : 0x100, static_cast<std::int64_t>(round) * 2700000, cc++);
             const bool rai = test.rapEvery > 0 ? round % test.rapEvery == 0 : test.rapEvery < 0 && round == 0;

@@ -177,6 +177,31 @@ bool isVideoStreamType(int streamType) {
     }
 }
 
+// Audio stream_type values: MPEG-1 and MPEG-2 audio, AAC in ADTS and in LATM
+// (ISO/IEC 13818-1 Table 2-34), and ATSC AC-3 and E-AC-3 (ATSC A/52).
+bool isAudioStreamType(int streamType) {
+    switch (streamType) {
+    case 0x03: case 0x04: case 0x0F: case 0x11: case 0x81: case 0x87:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// DVB carries AC-3, E-AC-3, and AAC as stream_type 0x06 (PES private data)
+// with the descriptor that names the codec (ETSI EN 300 468 tags 0x6A, 0x7A,
+// and 0x7C), in the ES descriptor loop [from, to).
+bool hasDvbAudioDescriptor(const QByteArray& section, int from, int to) {
+    for (int offset = from; offset + 2 <= to;) {
+        const int tag = static_cast<unsigned char>(section[offset]);
+        if (tag == 0x6A || tag == 0x7A || tag == 0x7C) {
+            return true;
+        }
+        offset += 2 + static_cast<unsigned char>(section[offset + 1]);
+    }
+    return false;
+}
+
 // The CA_descriptors (tag 0x09) in the descriptor loop [from, to): their
 // CA_PIDs and CA_system_ids.
 void readCaDescriptors(const QByteArray& section, int from, int to, std::set<int>* caPids, std::set<int>* caSystems) {
@@ -196,7 +221,7 @@ void readCaDescriptors(const QByteArray& section, int from, int to, std::set<int
 // The PMT fields the packetizer uses. The CA_descriptors of the program loop
 // and of each ES loop give the ECM PIDs and the CA systems in use.
 bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryPids, int* videoPid,
-              int* firstElementaryPid, std::set<int>* ecmPids, std::set<int>* caSystems) {
+              int* audioPid, std::set<int>* ecmPids, std::set<int>* caSystems) {
     if (section.size() < 16 || static_cast<unsigned char>(section[0]) != 0x02) {
         return false;
     }
@@ -211,7 +236,7 @@ bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryP
     ecmPids->clear();
     caSystems->clear();
     *videoPid = -1;
-    *firstElementaryPid = -1;
+    *audioPid = -1;
     *pcrPid = ((static_cast<unsigned char>(section[8]) & 0x1f) << 8) |
               static_cast<unsigned char>(section[9]);
     // PCR_PID 0x1FFF means no PCR (ISO/IEC 13818-1 Section 2.4.4.9), and the
@@ -231,8 +256,10 @@ bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryP
                                  static_cast<unsigned char>(section[offset + 4]);
         elementaryPids->insert(elementaryPid);
         readCaDescriptors(section, offset + 5, std::min(offset + 5 + esInfoLength, sectionEnd), ecmPids, caSystems);
-        if (*firstElementaryPid < 0) {
-            *firstElementaryPid = elementaryPid;
+        const int esInfoEnd = std::min(offset + 5 + esInfoLength, sectionEnd);
+        if (*audioPid < 0 && (isAudioStreamType(streamType) ||
+                              (streamType == 0x06 && hasDvbAudioDescriptor(section, offset + 5, esInfoEnd)))) {
+            *audioPid = elementaryPid;
         }
         if (*videoPid < 0 && isVideoStreamType(streamType)) {
             *videoPid = elementaryPid;
@@ -1005,11 +1032,11 @@ void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
     }
     int pcrPid = -1;
     int videoPid = -1;
-    int firstElementaryPid = -1;
+    int audioPid = -1;
     std::set<int> elementaryPids;
     std::set<int> ecmPids;
     std::set<int> caSystems;
-    if (!parsePmt(section.bytes, &pcrPid, &elementaryPids, &videoPid, &firstElementaryPid, &ecmPids, &caSystems)) {
+    if (!parsePmt(section.bytes, &pcrPid, &elementaryPids, &videoPid, &audioPid, &ecmPids, &caSystems)) {
         return;
     }
     m_ecmPids = ecmPids;
@@ -1017,7 +1044,7 @@ void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
     m_pmt = section;
     m_pcrPid = pcrPid;
     m_videoPid = videoPid;
-    m_firstElementaryPid = firstElementaryPid;
+    m_audioPid = audioPid;
     m_elementaryPids = elementaryPids;
     if (!m_opened) {
         return;
@@ -1268,7 +1295,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         // keeps its buffer: not after the PAT rewrite below replaces it.
         const QByteArray tsView = QByteArray::fromRawData(packet.constData() + (m_packetSize == 192 ? 4 : 0), 188);
         const int pid = pidOf(tsView);
-        if ((!m_sawFirstRap || !randomAccess()) && m_pcrPid >= 0 && pid == m_pcrPid) {
+        if (pid == m_pcrPid && m_pcrPid >= 0 && (!m_sawFirstRap || !randomAccess())) {
             const std::int64_t pcr = pcrOf(tsView);
             if (pcr >= 0) {
                 m_lastPcr27 = pcr;
@@ -1333,7 +1360,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         // No random access point yet: a Group starts at a PES start of the group
         // PID once 2 s of PCR time passed since the last start. The packet
         // that starts it begins the next Object when this one has packets.
-        if (timedGroupsActive() && m_rapPid >= 0 && pid == m_timedPid && payloadUnitStart(tsView) && timedGroupDue()) {
+        if (pid == m_timedPid && m_rapPid >= 0 && payloadUnitStart(tsView) && timedGroupsActive() && timedGroupDue()) {
             if (!payload.isEmpty()) {
                 m_carryPacket = std::move(packet);
                 m_carryOffset = packetOffset;
@@ -1426,10 +1453,15 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         m_gapCauses = 0;
     }
     if (timedStart && m_nextObjectId > 0) {
-        if (m_timedGroups++ == 0) {
-            qWarning("%s: No random access point for 2 s of PCR time: Groups start at a PES start of PID %d every 2 s "
-                     "until one arrives.", qUtf8Printable(m_label), m_timedPid);
+        // Once each time timed Groups take over, at most once per 10 s.
+        if (!rapDetected && !m_lastStartTimed) {
+            qWarning("%s: No random access point %s: Groups start at a PES start of PID %d every 2 s of PCR time "
+                     "until one arrives.", qUtf8Printable(m_label), m_sawFirstRap ? "for 10 s" : "so far", m_timedPid);
         }
+        ++m_timedGroups;
+    }
+    if (timedStart || rapDetected) {
+        m_lastStartTimed = timedStart && !rapDetected;
     }
     if (timedStart || rapDetected) {
         m_groupStartPcr27 = m_lastPcr27;
@@ -1538,8 +1570,9 @@ std::int64_t M2tsPacketizer::pcrSince(std::int64_t& start) {
     if (m_lastPcr27 < 0) {
         return -1;
     }
+    // An unset start, as after a gap, takes this PCR: the measure starts here.
     if (start < 0) {
-        start = m_lastPcr27;   // the first PCR starts the measure
+        start = m_lastPcr27;
     }
     const std::int64_t elapsed = m_lastPcr27 - start;
     return elapsed < 0 ? elapsed + kPcrWrap : elapsed;
@@ -1769,10 +1802,9 @@ bool M2tsPacketizer::startsRandomAccess(int pid, const QByteArray& tsPacket) {
 
 void M2tsPacketizer::setGroupPid(int pid) {
     m_rapPid = pid;
-    // Timed Groups start at a PES start. Without video, they follow the audio
-    // (the first elementary stream), whatever PID carries the PCR: a PID of
-    // its own never starts a PES.
-    m_timedPid = m_videoPid < 0 && m_firstElementaryPid >= 0 ? m_firstElementaryPid : pid;
+    // Timed Groups start at a PES start. Without video, they follow the audio,
+    // whatever PID carries the PCR: a PID of its own never starts a PES.
+    m_timedPid = m_videoPid < 0 && m_audioPid >= 0 ? m_audioPid : pid;
 }
 
 bool M2tsPacketizer::timedGroupsActive() {

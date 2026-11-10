@@ -295,7 +295,7 @@ private:
     int m_patProgramCount = 0;
     // First video elementary PID of the PMT; the PTS source for Object media time.
     int m_videoPid = -1;
-    int m_firstElementaryPid = -1;   // in PMT order
+    int m_audioPid = -1;   // the first audio stream in the PMT
     PtsUnwrapper m_ptsUnwrapper;
 
     // Current PSI of the source: the last PAT, the last PMT of the selected
@@ -365,6 +365,7 @@ private:
     // first random access point.
     std::int64_t m_lastPcr27 = -1;        // the latest PCR of the PCR PID
     std::int64_t m_lastRapPcr27 = -1;     // the PCR at the last random access point
+    bool m_lastStartTimed = false;        // the last Group started on time
     std::int64_t m_groupStartPcr27 = -1;  // the PCR when the current Group started
     bool m_groupStartsTimed = false;      // the next Object starts a Group on time
     bool m_carryTimed = false;            // m_carryPacket waits for a Group on time
