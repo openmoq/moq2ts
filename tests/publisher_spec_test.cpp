@@ -205,6 +205,9 @@ int main() {
     ok &= rejects(exampleWith(R"("draft": 22)", R"("draft": 22, "quic_idle_timeout_ms": 600001)"),
                   {QStringLiteral("relay.quic_idle_timeout_ms: 600001 is not an integer from 0 to 600000.")},
                   "a QUIC idle timeout over 10 minutes");
+    ok &= rejects(exampleWith(R"("draft": 22)", R"("draft": 22, "quic_idle_timeout_ms": 500)"),
+                  {QStringLiteral("relay.quic_idle_timeout_ms: 500 is neither 0 nor at least 1000.")},
+                  "a QUIC idle timeout under 1 s");
 
     // Unknown keys are refused at every level, by their full path.
     ok &= rejects(exampleWith(R"("segment_bytes": 65536)", R"("segment_bytes": 65536, "segment_byte": 1)"),

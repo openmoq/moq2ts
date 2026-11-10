@@ -357,7 +357,8 @@ int main(int argc, char** argv) {
              QStringLiteral("type"), QStringLiteral("16"));
     addValue(QStringLiteral("quic-idle-timeout"),
              QStringLiteral("The QUIC idle timeout offered to the relay, in ms: a relay that vanished, for example "
-                            "after a restart, is noticed within it. 0 keeps the default, 30 s."),
+                            "after a restart, is noticed within it. It also bounds each connection attempt. 0 "
+                            "keeps the default, 30 s."),
              QStringLiteral("ms"), QStringLiteral("0"));
     addValue(QStringLiteral("accessible-window"),
              QStringLiteral("Live sources: the window in seconds that the media timeline covers. The catalog declares it as "
@@ -445,8 +446,10 @@ int main(int argc, char** argv) {
     {
         bool idleOk = false;
         cfg.quicIdleTimeoutMs = parser.value(QStringLiteral("quic-idle-timeout")).toInt(&idleOk);
-        if (!idleOk || cfg.quicIdleTimeoutMs < 0 || cfg.quicIdleTimeoutMs > moq2ts::kMaxQuicIdleTimeoutMs) {
-            logLine(stderr, "error", QStringLiteral("--quic-idle-timeout must be a number of ms from 0 to %1.")
+        if (!idleOk || cfg.quicIdleTimeoutMs < 0 || cfg.quicIdleTimeoutMs > moq2ts::kMaxQuicIdleTimeoutMs ||
+            (cfg.quicIdleTimeoutMs != 0 && cfg.quicIdleTimeoutMs < moq2ts::kMinQuicIdleTimeoutMs)) {
+            logLine(stderr, "error", QStringLiteral("--quic-idle-timeout must be 0 or a number of ms from %1 to %2.")
+                                         .arg(moq2ts::kMinQuicIdleTimeoutMs)
                                          .arg(moq2ts::kMaxQuicIdleTimeoutMs));
             return 2;
         }

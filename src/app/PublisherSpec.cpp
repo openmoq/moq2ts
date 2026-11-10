@@ -140,6 +140,11 @@ bool readRelay(const QJsonObject& root, PublishConfig* relay, QString* error) {
                  kMaxQuicIdleTimeoutMs, false, &idleTimeoutMs, error)) {
         return false;
     }
+    if (idleTimeoutMs != 0 && idleTimeoutMs < kMinQuicIdleTimeoutMs) {
+        return fail(error, QStringLiteral("relay.quic_idle_timeout_ms: %1 is neither 0 nor at least %2.")
+                               .arg(idleTimeoutMs)
+                               .arg(kMinQuicIdleTimeoutMs));
+    }
     relay->quicIdleTimeoutMs = static_cast<int>(idleTimeoutMs);
     const QJsonValue insecure = object.value(QStringLiteral("insecure"));
     if (!insecure.isUndefined()) {
