@@ -326,8 +326,10 @@ Field presence is conditional:
   Start subscriber nothing, so a Group starts at the next PES start of the group
   PID once 2 seconds of PCR time passed since the last start. This only runs
   until the first random access point; the field stays undeclared. The look-ahead
-  for the first random access point reads up to 20,000 packets before the track
-  starts, which takes minutes on a low-rate live source.
+  for the first random access point of a live source stops at 10 s of PCR time
+  or 20,000 packets, whichever comes first, so a low-rate source does not wait
+  minutes for the track to start; a source with a GOP longer than 10 s starts
+  without random access too.
 
 ## Timeline track
 

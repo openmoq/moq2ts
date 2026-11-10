@@ -4,6 +4,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QIODevice>
 #include <QMap>
 #include <QSet>
 #include <QStringList>
@@ -17,7 +18,9 @@
 #include <chrono>
 #include <csignal>
 
+#include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -34,6 +37,30 @@ bool expect(bool cond, const std::string& msg) {
     if (!cond) { std::cerr << "FAIL: " << msg << '\n'; return false; }
     return true;
 }
+
+// A live source in memory: sequential, so the packetizer takes the live path.
+class SequentialDevice final : public QIODevice {
+public:
+    explicit SequentialDevice(QByteArray data) : m_data(std::move(data)) {}
+    bool isSequential() const override { return true; }
+    qint64 bytesAvailable() const override { return m_data.size() - m_pos + QIODevice::bytesAvailable(); }
+
+protected:
+    qint64 readData(char* out, qint64 maxSize) override {
+        const qint64 n = std::min<qint64>(maxSize, m_data.size() - m_pos);
+        if (n <= 0) {
+            return -1;
+        }
+        std::memcpy(out, m_data.constData() + m_pos, static_cast<std::size_t>(n));
+        m_pos += n;
+        return n;
+    }
+    qint64 writeData(const char*, qint64) override { return -1; }
+
+private:
+    QByteArray m_data;
+    qint64 m_pos = 0;
+};
 
 bool writeFile(const QString& path, const QByteArray& data) {
     QFile file(path);
@@ -1607,6 +1634,43 @@ int main() {
         }
         ok &= expect(idsStep, label + "Group IDs step by one");
         ok &= expect(objectZero, label + "a Group starts with Object 0");
+    }
+
+    // The look-ahead for the first random access point of a live source stops
+    // at 10 s of PCR time, so a low-rate source that sends no indicator does
+    // not hold up the start of the track (20,000 packets are minutes of a radio
+    // program). The stream is 20 s long with 12 packets per 0.1 s.
+    for (const int rapRound : {-1, 50}) {
+        const std::string label = rapRound < 0 ? "look-ahead, no RAI: " : "look-ahead, RAI at 5 s: ";
+        QByteArray ts;
+        int videoCc = 0;
+        for (int round = 0; round < 200; ++round) {
+            ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}), round & 0x0F);
+            ts += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}), round & 0x0F);
+            ts += pcrPacket(0x100, static_cast<std::int64_t>(round) * 2700000, videoCc++);
+            ts += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(static_cast<std::uint64_t>(round) * 9000), videoCc++,
+                               round == rapRound ? 0x40 : -1);
+            for (int k = 0; k < 8; ++k) {
+                ts += tb::tsPacket(0x100, false, QByteArray(184, char(k)), videoCc++);
+            }
+        }
+        const qsizetype roundBytes = 12 * 188;
+        auto device = std::make_shared<SequentialDevice>(ts);
+        M2tsPacketizer packetizer(device, QStringLiteral("live"));
+        QString error;
+        ok &= expect(packetizer.open(0, &error), label + "opens: " + error.toStdString());
+        M2tsObject object;
+        ok &= expect(packetizer.readObject(12, &object, &error), label + "reads an Object");
+        if (rapRound < 0) {
+            ok &= expect(packetizer.prebufferedBytes() >= 95 * roundBytes && packetizer.prebufferedBytes() <= 115 * roundBytes,
+                         label + "reads about 10 s: " + std::to_string(packetizer.prebufferedBytes() / roundBytes) + " rounds");
+            ok &= expect(!packetizer.randomAccess(), label + "mpeg2tsRandomAccess stays undeclared");
+            ok &= expect(pidOfPacket(object.payload.left(188)) == 0x0000,
+                         label + "the track starts at the first packet of the source");
+        } else {
+            ok &= expect(packetizer.randomAccess(), label + "a random access point inside the window is found");
+            ok &= expect(packetizer.prebufferedBytes() <= 55 * roundBytes, label + "stops at the random access point");
+        }
     }
 
     if (ok) {
