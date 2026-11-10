@@ -90,11 +90,12 @@ public:
         }
         m_readFd = fds[0];
         m_thread = std::make_unique<std::thread>(
-            [sock = m_sock, listener, writeFd = fds[1], stop = &m_stop, resyncPid, gaps]() {
+            [sock = m_sock, listener, writeFd = fds[1], stop = &m_stop, resyncPid, gaps, linkStats = &m_linkStats]() {
                 if (listener) {
-                    moq2ts::SrtSource::listenLoop(sock, writeFd, *stop, resyncPid.get(), gaps.get());
+                    moq2ts::SrtSource::listenLoop(sock, writeFd, *stop, resyncPid.get(), gaps.get(), linkStats);
                 } else {
-                    moq2ts::SrtSource::receiveLoop(sock, writeFd, *stop, resyncPid.get(), gaps.get());
+                    moq2ts::SrtSource::receiveLoop(sock, writeFd, *stop, resyncPid.get(), gaps.get(), nullptr,
+                                                   linkStats);
                 }
                 ::close(writeFd); // close write end to signal EOF to reader
             });
@@ -103,6 +104,9 @@ public:
 
     // The read end of the pipe, as a path the pipeline opens.
     QString readPath() const { return QStringLiteral("/dev/fd/%1").arg(m_readFd); }
+
+    // The SRT link figures of the current connection, none without one.
+    std::optional<moq2ts::SrtSource::LinkStats> linkStats() const { return m_linkStats.load(); }
 
     void stop() {
         m_stop.store(true, std::memory_order_release);
@@ -122,6 +126,7 @@ public:
 
 private:
     std::atomic<bool> m_stop{false};
+    moq2ts::SrtSource::LinkStatsSnapshot m_linkStats;
     std::unique_ptr<std::thread> m_thread;
     int m_sock = -1;
     int m_readFd = -1;
@@ -663,6 +668,19 @@ int main(int argc, char** argv) {
                                       static_cast<long long>(groups));
                          std::fflush(stdout);
                      });
+#ifdef MOQ2TS_HAS_SRT
+    // The health of the SRT link, once per second, also while no Object flows.
+    QTimer srtStats;
+    QObject::connect(&srtStats, &QTimer::timeout, &app, [&srtIngest] {
+        const auto link = srtIngest.linkStats();
+        std::fprintf(stdout, "[srt] %s\n",
+                     link ? qUtf8Printable(moq2ts::SrtSource::formatLinkStats(*link)) : "not connected");
+        std::fflush(stdout);
+    });
+    if (useSrt) {
+        srtStats.start(1000);
+    }
+#endif
 
     if (!publisher.connect(cfg)) {
         logLine(stderr, "error", QStringLiteral("Could not open MOQ publish session."));

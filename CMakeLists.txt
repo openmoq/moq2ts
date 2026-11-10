@@ -465,6 +465,10 @@ if(UNIX AND NOT APPLE AND MOQ2TS_ENABLE_SRT AND MOQ2TS_SRT_USABLE)
     target_link_libraries(moq2ts-srt-listener-tests PRIVATE moq2ts-core)
     add_test(NAME moq2ts-srt-listener-tests COMMAND moq2ts-srt-listener-tests)
     set_tests_properties(moq2ts-srt-listener-tests PROPERTIES TIMEOUT 60)
+    add_executable(moq2ts-srt-link-stats-tests tests/srt_link_stats_test.cpp)
+    target_include_directories(moq2ts-srt-link-stats-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-srt-link-stats-tests PRIVATE moq2ts-core)
+    add_test(NAME moq2ts-srt-link-stats-tests COMMAND moq2ts-srt-link-stats-tests)
 endif()
 
 # MSFTS catalog test (Qt Core only), and packetizer test on synthetic TS
