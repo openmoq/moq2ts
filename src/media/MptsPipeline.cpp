@@ -520,7 +520,8 @@ void MptsPipeline::run() {
                 if (!program->timelineTrack.isEmpty() && object.ptsUs.has_value() &&
                     program->timeline.lastGroupId != published.groupId &&
                     shared->push(index, {timelineObject(&program->timeline, program->timelineTrack, published,
-                                                        *object.ptsUs, nowUnixUs(), m_relay.accessibleWindowMs)},
+                                                        *object.ptsUs, nowUnixUs(), nowSteadyUs(),
+                                                        m_relay.accessibleWindowMs)},
                                  nullptr, object.sourceOffset, false) == Shared::Pushed::Stopped) {
                     break;
                 }

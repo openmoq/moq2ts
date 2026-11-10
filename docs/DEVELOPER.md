@@ -75,8 +75,8 @@ media publishing. It currently provides:
 - Whole source packets are grouped into MOQT Object payloads and exposed to
   `MoqxrPublisher::publishLiveObjects(...)`.
 - `LivePipeline` adds one timeline record per media Group and publishes the
-  whole record history as the first Object of the timeline Group of the same
-  number (MSF Section 7.3).
+  records of the accessible window as the first Object of the timeline Group
+  of the same number (MSF Section 7.3).
 
 ## File-level map
 
@@ -355,9 +355,10 @@ time on a live source and `0` on a VOD file.
 
 MSF Section 7.3 makes the first Object of each timeline Group an independent
 timeline. The timeline track therefore publishes one Object per media Group, in
-the Group of the same number, and that Object carries every record so far. The
-history grows for the length of a session, so moq2ts suits limited-time runs
-until MSF defines how to trim it (moq-wg/msf#205).
+the Group of the same number, and that Object carries the records of the
+accessible window (`--accessible-window`, 300 s by default), as the editor's
+copy of MSF asks. The window is measured on the steady clock, so a wallclock
+step does not move it.
 
 ## Runtime operational guidance
 
