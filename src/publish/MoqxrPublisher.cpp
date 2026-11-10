@@ -397,7 +397,9 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
 
             openmoq::publisher::transport::TlsConfig tls;
             tls.insecure_skip_verify = cfg.insecure;
-            const auto status = activePublisher->publish_live_objects(source, parseEndpoint(cfg.moqEndpoint), tls, false);
+            openmoq::publisher::transport::EndpointConfig endpoint = parseEndpoint(cfg.moqEndpoint);
+            endpoint.idle_timeout_ms = static_cast<std::uint32_t>(cfg.quicIdleTimeoutMs);
+            const auto status = activePublisher->publish_live_objects(source, endpoint, tls, false);
             // Every connection that carried Objects counts, also one that a
             // PAT change ends without a failure. So does one that stayed up
             // past the time a failing attempt takes: a publisher that waits

@@ -355,6 +355,10 @@ int main(int argc, char** argv) {
              QStringLiteral("The token type of the authorization token, as the relay expects it (moqx: "
                             "auth.token_type)."),
              QStringLiteral("type"), QStringLiteral("16"));
+    addValue(QStringLiteral("quic-idle-timeout"),
+             QStringLiteral("The QUIC idle timeout offered to the relay, in ms: a relay that vanished, for example "
+                            "after a restart, is noticed within it. 0 keeps the default, 30 s."),
+             QStringLiteral("ms"), QStringLiteral("0"));
     addValue(QStringLiteral("accessible-window"),
              QStringLiteral("Live sources: the window in seconds that the media timeline covers. The catalog declares it as "
                             "accessibleWindowTime and the timeline track keeps the records inside it, so that it stops "
@@ -435,6 +439,15 @@ int main(int argc, char** argv) {
         cfg.authTokenType = parser.value(QStringLiteral("auth-token-type")).toULongLong(&typeOk);
         if (!typeOk || cfg.authTokenType > static_cast<quint64>(moq2ts::kMaxAuthTokenType)) {
             logLine(stderr, "error", QStringLiteral("--auth-token-type must be an integer from 0 to 2^62 - 1."));
+            return 2;
+        }
+    }
+    {
+        bool idleOk = false;
+        cfg.quicIdleTimeoutMs = parser.value(QStringLiteral("quic-idle-timeout")).toInt(&idleOk);
+        if (!idleOk || cfg.quicIdleTimeoutMs < 0 || cfg.quicIdleTimeoutMs > moq2ts::kMaxQuicIdleTimeoutMs) {
+            logLine(stderr, "error", QStringLiteral("--quic-idle-timeout must be a number of ms from 0 to %1.")
+                                         .arg(moq2ts::kMaxQuicIdleTimeoutMs));
             return 2;
         }
     }

@@ -190,6 +190,22 @@ int main() {
                      "a malformed token is named, not echoed: " + error.toStdString());
     }
 
+    // relay.quic_idle_timeout_ms, as --quic-idle-timeout: 0 (the moqxr
+    // default, 30 s) unless set.
+    {
+        PublisherSpec spec;
+        QString error;
+        ok &= expect(parsePublisherSpec(kExample, &spec, &error) && spec.relay.quicIdleTimeoutMs == 0,
+                     "the QUIC idle timeout defaults to 0: " + error.toStdString());
+        ok &= expect(parsePublisherSpec(exampleWith(R"("draft": 22)", R"("draft": 22, "quic_idle_timeout_ms": 5000)"),
+                                        &spec, &error) &&
+                         spec.relay.quicIdleTimeoutMs == 5000,
+                     "relay.quic_idle_timeout_ms parses: " + error.toStdString());
+    }
+    ok &= rejects(exampleWith(R"("draft": 22)", R"("draft": 22, "quic_idle_timeout_ms": 600001)"),
+                  {QStringLiteral("relay.quic_idle_timeout_ms: 600001 is not an integer from 0 to 600000.")},
+                  "a QUIC idle timeout over 10 minutes");
+
     // Unknown keys are refused at every level, by their full path.
     ok &= rejects(exampleWith(R"("segment_bytes": 65536)", R"("segment_bytes": 65536, "segment_byte": 1)"),
                   {QStringLiteral("segment_byte: unknown key")}, "unknown root key");
