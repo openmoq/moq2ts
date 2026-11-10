@@ -2,6 +2,7 @@
 #include "ObjectLookahead.h"
 
 #include <QDebug>
+#include <QFile>
 #include <QMutexLocker>
 #include <QThread>
 
@@ -15,6 +16,7 @@
 #include <vector>
 
 #ifdef MOQ2TS_HAS_MOQXR
+#include "openmoq/publisher/cat4moq.h"
 #include "openmoq/publisher/live_object.h"
 #include "openmoq/publisher/moq_draft.h"
 #include "openmoq/publisher/publisher_api.h"
@@ -246,6 +248,28 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
         publisherConfig.paced = false;
         publisherConfig.loop = false;
         publisherConfig.subscriber_timeout = subscriberTimeout(cfg.liveSource);
+        // The setup token, opaque here: moqxr sends it as the relay's token
+        // type. The file is read again at each publish, so that a rotated
+        // token takes effect. Errors name the file, never the token.
+        QByteArray token = cfg.authToken;
+        if (!cfg.authTokenFile.isEmpty()) {
+            QFile file(cfg.authTokenFile);
+            if (!file.open(QIODevice::ReadOnly)) {
+                emit publishError(QStringLiteral("Cannot read the authorization token file %1: %2")
+                                      .arg(cfg.authTokenFile, file.errorString()));
+                return false;
+            }
+            token = file.readAll();
+        }
+        if (!token.isEmpty()) {
+            namespace cat4moq = openmoq::publisher::cat4moq;
+            const auto* bytes = reinterpret_cast<const std::uint8_t*>(token.constData());
+            publisherConfig.authorization.setup_credential = cat4moq::Credential{
+                .cwt = cat4moq::decode_credential_bytes({bytes, static_cast<std::size_t>(token.size())}),
+                .profile = cat4moq::Profile::kMoqxCompat,
+                .token_type = cfg.authTokenType,
+            };
+        }
         setAwaitSubscriberIndefinitely(publisherConfig, cfg.liveSource);
 
         // What outlives one connection: the source of Objects, the totals, and

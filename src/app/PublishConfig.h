@@ -56,6 +56,14 @@ struct PublishConfig {
     // A live publish connects to the relay again when the connection ends,
     // and goes on from the next Group (--no-reconnect turns it off).
     bool reconnect = true;
+    // The authorization token that the session setup carries, opaque to
+    // moq2ts: authToken holds it, or authTokenFile names the file that does.
+    // Either may start with "base64:" or "hex:", as moqx-issuer writes it.
+    // authTokenType is the token type that the relay expects (moqx:
+    // auth.token_type). Never logged.
+    QByteArray authToken;
+    QString authTokenFile;
+    quint64 authTokenType = 16;
     // The media timeline track of a live track. The editor's copy of MSF asks a
     // publisher to trim it to the track's accessibleWindowTime; the catalog
     // declares that window, and the timeline keeps the records inside it. 0

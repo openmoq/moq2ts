@@ -79,6 +79,8 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--accessible-window <seconds>` | `300` | Live sources: the window that the media timeline covers. The catalog declares it as `accessibleWindowTime` (editor's copy of MSF) on the media track, and the timeline track keeps the records inside it. Every Group repeats the whole timeline and a record weighs about 36 bytes, so without a window the track would pass 3 MB per Object after 48 hours of 2 s Groups. `0` declares no window and keeps every record |
 | `--no-timeline` | off | Publish no media timeline track. MSF 7 makes it optional |
 | `--no-reconnect` | off | Exit when the relay connection ends. By default a live publish (SRT, FIFO, pipe or capture source) connects to the relay again, with a backoff of 1 s doubling to 30 s, sends the latest catalog, and goes on from the next Group of every track; Group IDs keep increasing |
+| `--auth-token-file <path>` | - | A file that holds the authorization token that the session setup carries (MOQT AUTHORIZATION TOKEN, sent by value), as raw bytes or as text that starts with `base64:` or `hex:`, as moqx-issuer writes it. moq2ts reads it again at each connection and never logs it |
+| `--auth-token-type <type>` | `16` | The token type of the authorization token, as the relay expects it (moqx: `auth.token_type`) |
 | `--insecure` | off | Do not verify the relay certificate. By default it is verified against `$SSL_CERT_FILE` or the system CA bundle, so a relay with a self-signed certificate needs this flag; use it for local or test relays only |
 | `--paced` | off | File sources only: pace publishing at media rate instead of as fast as possible |
 | `--width/--height/--fps/--video-bitrate` | 1920/1080/30/2500 | Capture params |
@@ -307,6 +309,8 @@ macOS only; a Windows build rejects it.
 | `relay.endpoint`, `relay.namespace` | required | As `--endpoint` and `--namespace` |
 | `relay.draft` | `22` | As `--draft` |
 | `relay.insecure` | `false` | As `--insecure`: `true` skips verifying the relay certificate |
+| `relay.auth_token`, `relay.auth_token_file` | - | The authorization token, as a value or as a file (as `--auth-token-file`); at most one of them |
+| `relay.auth_token_type` | `16` | As `--auth-token-type` |
 | `ingest.srt` | - | SRT ingest: `mode` (`listener` or `caller`, default `listener`), `host` (default `0.0.0.0` for a listener, `127.0.0.1` for a caller), `port` (default 9000), `latency_ms` (default 120), as in the `--srt-config` entry |
 | `ingest.path` | - | A FIFO or a pipe. A seekable file is refused: the tracks are live |
 | `programs[].number` | required | The program number in the PAT, from 1 to 65535, listed once |

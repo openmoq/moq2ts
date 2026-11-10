@@ -341,6 +341,14 @@ int main(int argc, char** argv) {
     parser.addOption(QCommandLineOption(QStringLiteral("no-reconnect"),
         QStringLiteral("Exit when the relay connection ends. By default a live publish connects to the relay "
                        "again, with a backoff of 1 s up to 30 s, and goes on from the next Group.")));
+    addValue(QStringLiteral("auth-token-file"),
+             QStringLiteral("A file that holds the authorization token that the session setup carries, as raw bytes "
+                            "or as text that starts with \"base64:\" or \"hex:\". moq2ts never logs it."),
+             QStringLiteral("path"));
+    addValue(QStringLiteral("auth-token-type"),
+             QStringLiteral("The token type of the authorization token, as the relay expects it (moqx: "
+                            "auth.token_type)."),
+             QStringLiteral("type"), QStringLiteral("16"));
     addValue(QStringLiteral("accessible-window"),
              QStringLiteral("Live sources: the window in seconds that the media timeline covers. The catalog declares it as "
                             "accessibleWindowTime and the timeline track keeps the records inside it, so that it stops "
@@ -415,6 +423,15 @@ int main(int argc, char** argv) {
     cfg.insecure = parser.isSet(QStringLiteral("insecure"));
     cfg.reconnect = !parser.isSet(QStringLiteral("no-reconnect"));
     cfg.timelineTrack = !parser.isSet(QStringLiteral("no-timeline"));
+    cfg.authTokenFile = parser.value(QStringLiteral("auth-token-file"));
+    {
+        bool typeOk = false;
+        cfg.authTokenType = parser.value(QStringLiteral("auth-token-type")).toULongLong(&typeOk);
+        if (!typeOk) {
+            logLine(stderr, "error", QStringLiteral("--auth-token-type must be a non-negative integer."));
+            return 2;
+        }
+    }
     {
         bool windowOk = false;
         const double windowSeconds = parser.value(QStringLiteral("accessible-window")).toDouble(&windowOk);
