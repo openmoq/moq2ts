@@ -19,7 +19,8 @@ class ReconnectPolicy {
 public:
     static constexpr int kMaxFailedAttempts = 10;
 
-    // A connection carried Objects: the bound no longer applies, and the
+    // A connection carried Objects or stayed up for 30 s, as one does that
+    // waits for its first subscriber: the bound no longer applies, and the
     // next wait starts again at 2 s.
     void worked() {
         m_worked = true;

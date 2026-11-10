@@ -144,6 +144,10 @@ bool prepareReconnect(LiveResumeState& state, const QString& reason, int attempt
     return true;
 }
 
+// A connection that lasted this long was accepted by the relay: a failing
+// attempt ends within about 16 s.
+constexpr std::chrono::seconds kEstablishedConnection{30};
+
 QString giveUpReason(const QString& reason) {
     return QStringLiteral("%1; giving up after %2 attempts without a working connection to the relay.")
         .arg(reason)
@@ -271,6 +275,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
             }
 
             const int64_t objectsAtStart = state->objects.load(std::memory_order_acquire);
+            const auto connectionStart = std::chrono::steady_clock::now();
             // The first Object of a connection is the catalog: the latest one,
             // which a PSI change may have replaced.
             bool catalogSent = false;
@@ -394,8 +399,12 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
             tls.insecure_skip_verify = cfg.insecure;
             const auto status = activePublisher->publish_live_objects(source, parseEndpoint(cfg.moqEndpoint), tls, false);
             // Every connection that carried Objects counts, also one that a
-            // PAT change ends without a failure.
-            if (state->objects.load(std::memory_order_acquire) - objectsAtStart > 1) {
+            // PAT change ends without a failure. So does one that stayed up
+            // past the time a failing attempt takes: a publisher that waits
+            // for its first subscriber carries no Object, and a relay outage
+            // must not end it as if it had never connected.
+            if (state->objects.load(std::memory_order_acquire) - objectsAtStart > 1 ||
+                std::chrono::steady_clock::now() - connectionStart >= kEstablishedConnection) {
                 m_reconnectPolicy.worked();
             }
             // A stop request: running turned false, or stop() ended the publish.
