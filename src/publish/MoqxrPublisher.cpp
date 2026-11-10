@@ -1,6 +1,6 @@
 #include "MoqxrPublisher.h"
 #include "ObjectLookahead.h"
-#include "ReconnectBudget.h"
+#include "ReconnectPolicy.h"
 
 #include <QDebug>
 #include <QMutexLocker>
@@ -121,26 +121,18 @@ struct LiveResumeState {
     std::map<std::string, std::size_t> skipUpTo;
 };
 
-constexpr std::chrono::milliseconds kReconnectBackoffMin{1000};
-constexpr std::chrono::milliseconds kReconnectBackoffMax{30000};
-
 // After a failed connection of a live publish: keeps the next connection from
-// repeating Groups, waits out the backoff, and doubles it up to 30 s (reset to
-// 1 s when the connection had carried Objects). False when a stop request ended
+// repeating Groups and waits out the delay. False when a stop request ended
 // the wait.
 template <typename Stopped>
-bool prepareReconnect(LiveResumeState& state, const QString& reason, bool established,
-                      std::chrono::milliseconds& backoff, std::atomic<bool>& running, Stopped stopped) {
+bool prepareReconnect(LiveResumeState& state, const QString& reason, int attempt, std::chrono::seconds delay,
+                      std::atomic<bool>& running, Stopped stopped) {
     // The new connection starts every track at the Group after the last one
     // that the lost connection began.
     state.skipUpTo = state.highestGroup;
-    if (established) {
-        backoff = kReconnectBackoffMin;
-    }
-    qWarning("%s; connecting to the relay again in %lld ms.", qUtf8Printable(reason),
-             static_cast<long long>(backoff.count()));
-    const auto deadline = std::chrono::steady_clock::now() + backoff;
-    backoff = std::min(backoff * 2, kReconnectBackoffMax);
+    qWarning("%s; attempt %d failed, connecting to the relay again in %lld s.", qUtf8Printable(reason), attempt,
+             static_cast<long long>(delay.count()));
+    const auto deadline = std::chrono::steady_clock::now() + delay;
     while (std::chrono::steady_clock::now() < deadline) {
         if (stopped() || !running.load(std::memory_order_acquire)) {
             return false;
@@ -153,7 +145,7 @@ bool prepareReconnect(LiveResumeState& state, const QString& reason, bool establ
 QString giveUpReason(const QString& reason) {
     return QStringLiteral("%1; giving up after %2 attempts without a working connection to the relay.")
         .arg(reason)
-        .arg(moq2ts::ReconnectBudget::kMaxFailedAttempts);
+        .arg(moq2ts::ReconnectPolicy::kMaxFailedAttempts);
 }
 
 template <typename Config>
@@ -267,8 +259,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
             QMutexLocker locker(&m_mutex);
             return !m_connected;
         };
-        std::chrono::milliseconds backoff = kReconnectBackoffMin;
-        ReconnectBudget retries;
+        ReconnectPolicy retries;
 
         for (;;) {
             openmoq::publisher::LiveObjectSource source;
@@ -388,12 +379,13 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                 const bool permanent = status.failure_kind == FailureKind::kFatal ||
                                        status.failure_kind == FailureKind::kEndpointPermanent;
                 const bool established = state->objects.load(std::memory_order_acquire) - objectsAtStart > 1;
-                if (!retries.allowRetry(permanent, established)) {
+                const std::optional<std::chrono::seconds> delay = retries.nextDelay(permanent, established);
+                if (!delay) {
                     emit publishError(permanent ? QString::fromStdString(status.message)
                                                 : giveUpReason(QString::fromStdString(status.message)));
                     return false;
                 }
-                if (!prepareReconnect(*state, QString::fromStdString(status.message), established, backoff,
+                if (!prepareReconnect(*state, QString::fromStdString(status.message), retries.failedAttempts(), *delay,
                                       running, isStopped)) {
                     return true;   // stopped while waiting
                 }
@@ -432,11 +424,13 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                 // The relay closed the session without an error.
                 if (mayReconnect && status.ok) {
                     const bool established = state->objects.load(std::memory_order_acquire) - objectsAtStart > 1;
-                    if (!retries.allowRetry(false, established)) {
+                    const std::optional<std::chrono::seconds> delay = retries.nextDelay(false, established);
+                    if (!delay) {
                         emit publishError(giveUpReason(unexpectedEnd));
                         return false;
                     }
-                    if (!prepareReconnect(*state, unexpectedEnd, established, backoff, running, isStopped)) {
+                    if (!prepareReconnect(*state, unexpectedEnd, retries.failedAttempts(), *delay, running,
+                                          isStopped)) {
                         return true;   // stopped while waiting
                     }
                     continue;
