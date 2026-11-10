@@ -140,6 +140,26 @@ int main() {
                      "segment bytes of 1 MiB parse: " + error.toStdString());
     }
 
+    // The media timeline, as --no-timeline and --accessible-window set it:
+    // on with a 300 s window by default.
+    {
+        PublisherSpec spec;
+        QString error;
+        ok &= expect(parsePublisherSpec(kExample, &spec, &error) && spec.relay.timelineTrack &&
+                         spec.relay.accessibleWindowMs == 300000,
+                     "the timeline defaults to on with a 300 s window: " + error.toStdString());
+        ok &= expect(parsePublisherSpec(exampleWith(R"("segment_bytes": 65536)",
+                                                    R"("segment_bytes": 65536, "timeline": false, "accessible_window_ms": 60000)"),
+                                        &spec, &error) &&
+                         !spec.relay.timelineTrack && spec.relay.accessibleWindowMs == 60000,
+                     "timeline and accessible_window_ms parse: " + error.toStdString());
+    }
+    ok &= rejects(exampleWith(R"("segment_bytes": 65536)", R"("segment_bytes": 65536, "timeline": "no")"),
+                  {QStringLiteral("timeline: \"no\" is not true or false.")}, "a timeline that is not a boolean");
+    ok &= rejects(exampleWith(R"("segment_bytes": 65536)", R"("segment_bytes": 65536, "accessible_window_ms": -1)"),
+                  {QStringLiteral("accessible_window_ms: -1 is not an integer from 0 to 2000000000.")},
+                  "a negative accessible window");
+
     // Unknown keys are refused at every level, by their full path.
     ok &= rejects(exampleWith(R"("segment_bytes": 65536)", R"("segment_bytes": 65536, "segment_byte": 1)"),
                   {QStringLiteral("segment_byte: unknown key")}, "unknown root key");
