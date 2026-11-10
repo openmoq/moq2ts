@@ -314,6 +314,7 @@ using Feed = std::function<void(int fd, const MptsPipeline& pipeline, const std:
 
 struct Options {
     std::shared_ptr<moq2ts::SourceGapLog> sourceGaps;
+    std::function<void(PublishConfig& relay)> relay;
     std::function<void(const std::atomic<bool>& running)> beforeFirstPull;
 };
 
@@ -329,6 +330,9 @@ Run publish(const QString& source, const QList<MptsProgramConfig>& programs, con
     relay.moqEndpoint = QStringLiteral("mock://local");
     relay.namespaceName = QStringLiteral("live/mpts");
     relay.fragmentDurationMs = 0;
+    if (options.relay) {
+        options.relay(relay);
+    }
     MptsConfig config;
     config.sourcePath = source;
     config.programs = programs;
@@ -404,6 +408,20 @@ Feed liveFeed(const QByteArray& data, qsizetype leadBytes) {
         writeAll(fd, data.left(leadBytes));
         if (waitFor([&] { return atLiveEdge.load(); })) {
             writeAll(fd, data.mid(leadBytes));
+        }
+    };
+}
+
+// As liveFeed, then the rest one round of the given size at a time, pace apart.
+Feed pacedFeed(const QByteArray& data, qsizetype leadBytes, qsizetype roundBytes, std::chrono::milliseconds pace) {
+    return [=](int fd, const MptsPipeline&, const std::atomic<bool>& atLiveEdge) {
+        writeAll(fd, data.left(leadBytes));
+        if (!waitFor([&] { return atLiveEdge.load(); })) {
+            return;
+        }
+        for (qsizetype offset = leadBytes; offset < data.size(); offset += roundBytes) {
+            writeAll(fd, data.mid(offset, roundBytes));
+            std::this_thread::sleep_for(pace);
         }
     };
 }
@@ -561,6 +579,34 @@ int main() {
                      "two programs: program 102 declares a worked-out mux rate");
         ok &= expect(second.value(QStringLiteral("mpeg2tsProgramNumber")).toInt() == 102,
                      "two programs: program 102 is named");
+    }
+
+    // The timeline settings reach the multi-program path. Without the
+    // timeline, no timeline Object goes out. With a 100 ms window, a timeline
+    // Object holds the records of the window only: one Group per round,
+    // rounds 30 ms apart.
+    {
+        const Run none = publish(dir.filePath("no-timeline.fifo"), {program(101), program(102)}, QByteArray(),
+                                 liveFeed(mptsStream({101, 102}, 30), roundsBytes(2, 15)), {},
+                                 Options{.relay = [](PublishConfig& relay) { relay.timelineTrack = false; }});
+        const QStringList tracks = publishedTracks(none.log);
+        ok &= expect(tracks.count(QStringLiteral("program-101")) > 0 && !tracks.contains(QStringLiteral("program-101.timeline")),
+                     "no timeline: media Objects and no timeline Object");
+        const Run windowed = publish(dir.filePath("window.fifo"), {program(101), program(102)}, QByteArray(),
+                                     pacedFeed(mptsStream({101, 102}, 60), roundsBytes(2, 15), roundsBytes(2, 1),
+                                               std::chrono::milliseconds(30)),
+                                     {}, Options{.relay = [](PublishConfig& relay) { relay.accessibleWindowMs = 100; }});
+        int timelineObjects = 0;
+        qsizetype records = 0;
+        for (const ReadyObject& ready : windowed.sent) {
+            if (ready.object.trackName == QStringLiteral("program-101.timeline")) {
+                ++timelineObjects;
+                records = QJsonDocument::fromJson(ready.object.payload).array().size();
+            }
+        }
+        ok &= expect(timelineObjects >= 30, "window: a timeline Object per Group, not " + std::to_string(timelineObjects));
+        ok &= expect(records >= 1 && records <= 15,
+                     "window: the last timeline Object holds the records of the window, not " + std::to_string(records));
     }
 
     // MSFTS 6.7: a configured mux rate below the measured rate of the program

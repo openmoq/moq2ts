@@ -313,6 +313,8 @@ macOS only; a Windows build rejects it.
 | `programs[].mux_rate_bps` | `0` | `mpeg2tsMuxRate` of the track; 0 works it out from the rate measured at start-up. A value below the measured rate gets a warning: a receiver that pads to it overflows |
 | `programs[].si` | none | The DVB SI tables the track keeps, by the names of `--si` |
 | `segment_bytes` | `65536` | As `--segment-bytes`, from 1 to 1048576 (1 MiB) |
+| `timeline` | `true` | `false` publishes no media timeline track, as `--no-timeline` |
+| `accessible_window_ms` | `300000` | As `--accessible-window`, in milliseconds, from 0 to 2000000000 |
 
 `ingest` holds exactly one of `srt` or `path`. An unknown key is refused. An
 invalid file exits with code 2, and the error names the field and the value. A

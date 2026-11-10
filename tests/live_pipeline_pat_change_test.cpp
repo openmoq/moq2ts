@@ -124,6 +124,8 @@ struct Session {
     QString track;
     QByteArray catalog;
     int mediaObjects = 0;
+    int timelineObjects = 0;
+    QByteArray lastTimeline;
 };
 
 class TestPublisher final : public IMoqOutput {
@@ -148,6 +150,9 @@ public:
             }
             if (object->trackName == mediaTrack) {
                 ++session.mediaObjects;
+            } else if (object->trackName == mediaTrack + QStringLiteral(".timeline")) {
+                ++session.timelineObjects;
+                session.lastTimeline = object->payload;
             }
         }
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -191,14 +196,20 @@ int trackCount(const QByteArray& catalog) {
     return count;
 }
 
-// Runs an unmodified live publish of data through a FIFO.
+// Runs an unmodified live publish of data through a FIFO. With a pace, the
+// writer sends paceBytes at a time, pace apart.
 std::vector<Session> publish(const QString& fifo, const QByteArray& data,
-                             const std::function<void(PublishConfig&)>& adjust = {}) {
+                             const std::function<void(PublishConfig&)>& adjust = {},
+                             qsizetype paceBytes = 0, std::chrono::milliseconds pace = {}) {
     ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
     std::thread writer([&] {
         const int fd = openWriter(fifo);
         if (fd >= 0) {
-            writeAll(fd, data);
+            const qsizetype chunk = paceBytes > 0 ? paceBytes : data.size();
+            for (qsizetype offset = 0; offset < data.size(); offset += chunk) {
+                writeAll(fd, data.mid(offset, chunk));
+                std::this_thread::sleep_for(pace);
+            }
             ::close(fd);
         }
     });
@@ -280,6 +291,7 @@ int main() {
             ok &= expect(mediaTrack(byDefault[0].catalog, "program-1").value("accessibleWindowTime").toInt() == 300000,
                          "timeline: the default window is 300 s");
             ok &= expect(timelineTrackCount(byDefault[0].catalog) == 1, "timeline: the track is published");
+            ok &= expect(byDefault[0].timelineObjects > 0, "timeline: the publish path sends timeline Objects");
         }
         const std::vector<Session> unbounded = publish(dir.filePath("timeline-unbounded.fifo"), data,
                                                        [](PublishConfig& cfg) { cfg.accessibleWindowMs = 0; });
@@ -292,6 +304,21 @@ int main() {
         if (expect(none.size() == 1, "no timeline: one session")) {
             ok &= expect(timelineTrackCount(none[0].catalog) == 0, "no timeline: no mediatimeline track");
             ok &= expect(none[0].mediaObjects > 0, "no timeline: the media still publishes");
+            ok &= expect(none[0].timelineObjects == 0, "no timeline: no timeline Object is sent");
+        }
+        // The publish path trims the timeline to the window: one Group per
+        // round, written 30 ms apart, against a 100 ms window.
+        constexpr qsizetype round = 12 * 188;
+        const std::vector<Session> windowed = publish(dir.filePath("timeline-window.fifo"), data,
+                                                      [](PublishConfig& cfg) { cfg.accessibleWindowMs = 100; },
+                                                      round, std::chrono::milliseconds(30));
+        ok &= expect(windowed.size() == 1, "window: one session");
+        if (windowed.size() == 1) {
+            const qsizetype records = QJsonDocument::fromJson(windowed[0].lastTimeline).array().size();
+            ok &= expect(windowed[0].timelineObjects >= 30, "window: a timeline Object per Group");
+            ok &= expect(records >= 1 && records <= 15,
+                         "window: the last timeline Object holds the records of the window, not " +
+                             std::to_string(records));
         }
     }
 

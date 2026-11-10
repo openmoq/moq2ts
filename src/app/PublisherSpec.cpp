@@ -258,19 +258,31 @@ bool parsePublisherSpec(const QByteArray& json, PublisherSpec* out, QString* err
     const QJsonObject root = document.object();
     if (!checkKeys(root, QString(),
                    {QStringLiteral("relay"), QStringLiteral("ingest"), QStringLiteral("programs"),
-                    QStringLiteral("segment_bytes")},
+                    QStringLiteral("segment_bytes"), QStringLiteral("timeline"), QStringLiteral("accessible_window_ms")},
                    error)) {
         return false;
     }
     PublisherSpec spec;
     qint64 segmentBytes = spec.segmentBytes;
+    // As --accessible-window, which takes up to 2,000,000 s.
+    qint64 windowMs = spec.relay.accessibleWindowMs;
     if (!readRelay(root, &spec.relay, error) || !readIngest(root, &spec, error) ||
         !readPrograms(root, &spec.programs, error) ||
         !readInt(root, QStringLiteral("segment_bytes"), QStringLiteral("segment_bytes"), 1, kMaxSegmentBytes, false,
-                 &segmentBytes, error)) {
+                 &segmentBytes, error) ||
+        !readInt(root, QStringLiteral("accessible_window_ms"), QStringLiteral("accessible_window_ms"), 0,
+                 2000000000, false, &windowMs, error)) {
         return false;
     }
     spec.segmentBytes = static_cast<int>(segmentBytes);
+    spec.relay.accessibleWindowMs = static_cast<int>(windowMs);
+    const QJsonValue timeline = root.value(QStringLiteral("timeline"));
+    if (!timeline.isUndefined()) {
+        if (!timeline.isBool()) {
+            return fail(error, QStringLiteral("timeline: %1 is not true or false.").arg(jsonText(timeline)));
+        }
+        spec.relay.timelineTrack = timeline.toBool();
+    }
     if (out != nullptr) {
         *out = spec;
     }

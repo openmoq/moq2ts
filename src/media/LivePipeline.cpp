@@ -103,9 +103,10 @@ PublishedObject timelineObject(TimelineHistory* history,
                                const PublishedObject& media,
                                std::uint64_t mediaTimeUs,
                                std::uint64_t wallClockUnixUs,
+                               std::int64_t steadyUs,
                                std::int64_t windowMs) {
     TimelineHistory::Record record;
-    record.timeMs = static_cast<std::int64_t>((wallClockUnixUs > 0 ? wallClockUnixUs : mediaTimeUs) / 1000ULL);
+    record.timeMs = steadyUs / 1000;
     record.json = MsftsMuxer::mediaTimelineRecord(mediaTimeUs, media.groupId, media.objectId, wallClockUnixUs);
     history->records.push_back(std::move(record));
     history->lastGroupId = media.groupId;
@@ -339,7 +340,8 @@ void LivePipeline::runLoop() {
             // starts a video PES, with that PES's PTS (MSF 7.1.1).
             if (!timelineTrackName.isEmpty() && object.ptsUs.has_value() && st->timeline.lastGroupId != published.groupId) {
                 st->pending.push_back(timelineObject(&st->timeline, timelineTrackName, published,
-                                                     *object.ptsUs, nowUnixUs(), m_config.accessibleWindowMs));
+                                                     *object.ptsUs, nowUnixUs(), nowSteadyUs(),
+                                                     m_config.accessibleWindowMs));
             }
             ++st->objects;
             st->bytes += published.payload.size();
@@ -539,7 +541,7 @@ void LivePipeline::runLoop() {
             if (!timelineTrackName.isEmpty() && object.ptsUs.has_value() && st->timeline.lastGroupId != published.groupId) {
                 // MSF 7.1.1: the wallclock time SHOULD be 0 for a VOD asset.
                 st->pending.push_back(timelineObject(&st->timeline, timelineTrackName, published,
-                                                     *object.ptsUs, liveStream ? nowUnixUs() : 0,
+                                                     *object.ptsUs, liveStream ? nowUnixUs() : 0, nowSteadyUs(),
                                                      liveStream ? m_config.accessibleWindowMs : 0));
             }
             ++st->objects;
