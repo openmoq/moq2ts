@@ -196,7 +196,7 @@ void readCaDescriptors(const QByteArray& section, int from, int to, std::set<int
 // The PMT fields the packetizer uses. The CA_descriptors of the program loop
 // and of each ES loop give the ECM PIDs and the CA systems in use.
 bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryPids, int* videoPid,
-              std::set<int>* ecmPids, std::set<int>* caSystems) {
+              int* firstElementaryPid, std::set<int>* ecmPids, std::set<int>* caSystems) {
     if (section.size() < 16 || static_cast<unsigned char>(section[0]) != 0x02) {
         return false;
     }
@@ -211,6 +211,7 @@ bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryP
     ecmPids->clear();
     caSystems->clear();
     *videoPid = -1;
+    *firstElementaryPid = -1;
     *pcrPid = ((static_cast<unsigned char>(section[8]) & 0x1f) << 8) |
               static_cast<unsigned char>(section[9]);
     // PCR_PID 0x1FFF means no PCR (ISO/IEC 13818-1 Section 2.4.4.9), and the
@@ -230,6 +231,9 @@ bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryP
                                  static_cast<unsigned char>(section[offset + 4]);
         elementaryPids->insert(elementaryPid);
         readCaDescriptors(section, offset + 5, std::min(offset + 5 + esInfoLength, sectionEnd), ecmPids, caSystems);
+        if (*firstElementaryPid < 0) {
+            *firstElementaryPid = elementaryPid;
+        }
         if (*videoPid < 0 && isVideoStreamType(streamType)) {
             *videoPid = elementaryPid;
         }
@@ -568,7 +572,7 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     // Group boundaries follow the random_access_indicator of the video PID, or
     // of the PCR PID when the PMT lists no video stream. The PCR can travel on
     // a PID of its own, which never carries the indicator.
-    m_rapPid = m_videoPid >= 0 ? m_videoPid : m_pcrPid;
+    setGroupPid(m_videoPid >= 0 ? m_videoPid : m_pcrPid);
     // An unmodified track carries its source PAT and PMT as initData, so a
     // joining subscriber can pass them to the receiver before the first Object
     // (draft "Use of MSF Initialization Data"). refreshInitData() says which
@@ -831,7 +835,7 @@ void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
         m_pmtPid = programs.front().second;
         m_pmtAssembler.reset();
         m_pmt = {};
-        m_rapPid = kAwaitingPmt;
+        setGroupPid(kAwaitingPmt);
     }
     if (listed && pmtPid != m_pmtPid) {
         qWarning("Program %d moved its PMT from PID %d to PID %d.", m_programNumber, m_pmtPid, pmtPid);
@@ -1001,10 +1005,11 @@ void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
     }
     int pcrPid = -1;
     int videoPid = -1;
+    int firstElementaryPid = -1;
     std::set<int> elementaryPids;
     std::set<int> ecmPids;
     std::set<int> caSystems;
-    if (!parsePmt(section.bytes, &pcrPid, &elementaryPids, &videoPid, &ecmPids, &caSystems)) {
+    if (!parsePmt(section.bytes, &pcrPid, &elementaryPids, &videoPid, &firstElementaryPid, &ecmPids, &caSystems)) {
         return;
     }
     m_ecmPids = ecmPids;
@@ -1012,6 +1017,7 @@ void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
     m_pmt = section;
     m_pcrPid = pcrPid;
     m_videoPid = videoPid;
+    m_firstElementaryPid = firstElementaryPid;
     m_elementaryPids = elementaryPids;
     if (!m_opened) {
         return;
@@ -1020,7 +1026,7 @@ void M2tsPacketizer::onPmt(const PsiAssembler::Section& section) {
     // publishes it in a new catalog. The advisory fields keep their values from
     // the start: the draft lets the PSI in the packets take precedence.
     qWarning("The PMT of program %d changed; the track follows it.", m_programNumber);
-    m_rapPid = m_videoPid >= 0 ? m_videoPid : m_pcrPid;
+    setGroupPid(m_videoPid >= 0 ? m_videoPid : m_pcrPid);
     if (!m_transparent) {
         selectPids();
     }
@@ -1262,7 +1268,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         // keeps its buffer: not after the PAT rewrite below replaces it.
         const QByteArray tsView = QByteArray::fromRawData(packet.constData() + (m_packetSize == 192 ? 4 : 0), 188);
         const int pid = pidOf(tsView);
-        if (!m_sawFirstRap && m_pcrPid >= 0 && pid == m_pcrPid) {
+        if ((!m_sawFirstRap || !randomAccess()) && m_pcrPid >= 0 && pid == m_pcrPid) {
             const std::int64_t pcr = pcrOf(tsView);
             if (pcr >= 0) {
                 m_lastPcr27 = pcr;
@@ -1327,7 +1333,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         // No random access point yet: a Group starts at a PES start of the group
         // PID once 2 s of PCR time passed since the last start. The packet
         // that starts it begins the next Object when this one has packets.
-        if (!m_sawFirstRap && m_rapPid >= 0 && pid == m_rapPid && payloadUnitStart(tsView) && timedGroupDue()) {
+        if (timedGroupsActive() && m_rapPid >= 0 && pid == m_timedPid && payloadUnitStart(tsView) && timedGroupDue()) {
             if (!payload.isEmpty()) {
                 m_carryPacket = std::move(packet);
                 m_carryOffset = packetOffset;
@@ -1387,7 +1393,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         }
         // Use the known RAP PID if already identified from PAT/PMT or prior latch.
         if (m_rapPid == -1) {
-            m_rapPid = pid; // fallback: latch on first RAI PID seen
+            setGroupPid(pid); // fallback: latch on first RAI PID seen
         }
         rapDetected = pid == m_rapPid;
         if (rapDetected) {
@@ -1421,12 +1427,15 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     }
     if (timedStart && m_nextObjectId > 0) {
         if (m_timedGroups++ == 0) {
-            qWarning("%s: No random access point so far: Groups start at a PES start of PID %d every 2 s of PCR time "
-                     "until one arrives.", qUtf8Printable(m_label), m_rapPid);
+            qWarning("%s: No random access point for 2 s of PCR time: Groups start at a PES start of PID %d every 2 s "
+                     "until one arrives.", qUtf8Printable(m_label), m_timedPid);
         }
     }
     if (timedStart || rapDetected) {
         m_groupStartPcr27 = m_lastPcr27;
+    }
+    if (rapDetected) {
+        m_lastRapPcr27 = m_lastPcr27;
     }
     // Report long GOPs as an operational latency hint. MSFTS-02 does not set a
     // maximum Group duration.
@@ -1525,25 +1534,26 @@ constexpr std::int64_t kTimedGroupPcrTicks = 2 * 27000000;
 constexpr std::int64_t kPcrWrap = (std::int64_t{1} << 33) * 300;
 }  // namespace
 
-bool M2tsPacketizer::timedGroupDue() {
+std::int64_t M2tsPacketizer::pcrSince(std::int64_t& start) {
     if (m_lastPcr27 < 0) {
-        return false;
+        return -1;
     }
-    if (m_groupStartPcr27 < 0) {
-        m_groupStartPcr27 = m_lastPcr27;   // the first PCR starts the measure
-        return false;
+    if (start < 0) {
+        start = m_lastPcr27;   // the first PCR starts the measure
     }
-    std::int64_t elapsed = m_lastPcr27 - m_groupStartPcr27;
-    if (elapsed < 0) {
-        elapsed += kPcrWrap;
-    }
-    return elapsed >= kTimedGroupPcrTicks;
+    const std::int64_t elapsed = m_lastPcr27 - start;
+    return elapsed < 0 ? elapsed + kPcrWrap : elapsed;
+}
+
+bool M2tsPacketizer::timedGroupDue() {
+    return pcrSince(m_groupStartPcr27) >= kTimedGroupPcrTicks;
 }
 
 void M2tsPacketizer::restartAfterGap(bool discontinuity) {
     // The PCR may jump across the gap.
     m_lastPcr27 = -1;
     m_groupStartPcr27 = -1;
+    m_lastRapPcr27 = -1;
     // A section in progress cannot continue across the gap.
     m_patAssembler.reset();
     m_pmtAssembler.reset();
@@ -1611,13 +1621,13 @@ bool M2tsPacketizer::findRandomAccess() {
                 break;
             }
             if (span.stalled()) {
-                m_rapPid = savedRapPid;
+                setGroupPid(savedRapPid);
                 m_startError = noPcrError();
                 return false;
             }
         }
     }
-    m_rapPid = savedRapPid;
+    setGroupPid(savedRapPid);
     if (m_timedStartWindows) {
         qWarning("No random_access_indicator within the first %lld s of the live source; the track starts at "
                  "its first packet and does not declare mpeg2tsRandomAccess.",
@@ -1752,9 +1762,25 @@ bool M2tsPacketizer::startsRandomAccess(int pid, const QByteArray& tsPacket) {
         return false;
     }
     if (m_rapPid == -1) {
-        m_rapPid = pid;   // fallback: latch on the first PID with the indicator
+        setGroupPid(pid);   // fallback: latch on the first PID with the indicator
     }
     return pid == m_rapPid;
+}
+
+void M2tsPacketizer::setGroupPid(int pid) {
+    m_rapPid = pid;
+    // Timed Groups start at a PES start. Without video, they follow the audio
+    // (the first elementary stream), whatever PID carries the PCR: a PID of
+    // its own never starts a PES.
+    m_timedPid = m_videoPid < 0 && m_firstElementaryPid >= 0 ? m_firstElementaryPid : pid;
+}
+
+bool M2tsPacketizer::timedGroupsActive() {
+    // After a random access point, only once 10 s pass without another, so
+    // that a source with a usual GOP keeps its Groups on its random access
+    // points. A track that declares mpeg2tsRandomAccess starts every Group at
+    // one (MSFTS "Group Boundaries"), so its timed Groups end at the first.
+    return !m_sawFirstRap || (!randomAccess() && pcrSince(m_lastRapPcr27) >= kRapWindowPcr);
 }
 
 bool M2tsPacketizer::randomAccess() const {

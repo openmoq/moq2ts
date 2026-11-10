@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <atomic>
@@ -1607,6 +1608,80 @@ int main() {
         }
         ok &= expect(idsStep, label + "Group IDs step by one");
         ok &= expect(objectZero, label + "a Group starts with Object 0");
+    }
+
+    // Timed Groups for the sources that #40 left in Group 0 (#49), on 20 s of
+    // a live source (the PCR advances 0.1 s per round):
+    // - audio: an audio-only program whose PCR travels on a PID of its own.
+    //   Groups start at a PES start of the audio PID about every 2 s.
+    // - single RAP: a video source that sets the indicator once, on an
+    //   unmodified track with source gaps, as SRT ingest runs. Groups resume
+    //   10 s after it, then come every 2 s.
+    // - normal GOP: the same track with a random access point every 3 s keeps
+    //   its Groups on them, as before.
+    // - declared: a track that declares mpeg2tsRandomAccess keeps Groups at
+    //   random access points only, even after a single one.
+    struct TimedCase {
+        std::string kind;
+        int rapEvery;   // rounds between random access points; 0: never, -1: once
+        bool unmodifiedWithGaps;
+        int minStarts;
+        int maxStarts;
+    };
+    for (const TimedCase& test : {TimedCase{"audio", 0, false, 9, 11}, TimedCase{"single RAP", -1, true, 5, 6},
+                                  TimedCase{"normal GOP", 30, true, 7, 7}, TimedCase{"declared", -1, false, 1, 1}}) {
+        const std::string label = test.kind + ": ";
+        const bool audio = test.kind == "audio";
+        const int groupPid = audio ? 0x101 : 0x100;
+        QByteArray ts;
+        int cc = 0;
+        for (int round = 0; round < 200; ++round) {
+            ts += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}), round & 0x0F);
+            ts += audio ? tb::psiPacket(0x1000, tb::pmtSection(1, 0x1FF, {{0x0F, 0x101}}), round & 0x0F)
+                        : tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}), round & 0x0F);
+            ts += pcrPacket(audio ? 0x1FF : 0x100, static_cast<std::int64_t>(round) * 2700000, cc++);
+            const bool rai = test.rapEvery > 0 ? round % test.rapEvery == 0 : test.rapEvery < 0 && round == 0;
+            ts += tb::tsPacket(groupPid, true, tb::pesHeaderWithPts(static_cast<std::uint64_t>(round) * 9000), cc++,
+                               rai ? 0x40 : -1);
+            for (int k = 0; k < 8; ++k) {
+                ts += tb::tsPacket(groupPid, false, QByteArray(184, char(k)), cc++);
+            }
+        }
+        // A live source: only a live track can declare mpeg2tsRandomAccess.
+        const QString fifo = dir.filePath(QString::fromStdString("timed-" + test.kind + ".fifo").replace(' ', '-'));
+        ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
+        std::thread writer([&] { writeFile(fifo, ts); });
+        M2tsPacketizer packetizer(fifo);
+        if (test.unmodifiedWithGaps) {
+            packetizer.setTransparent(true);
+            packetizer.setSourceGaps(std::make_shared<moq2ts::SourceGapLog>());
+        }
+        QString error;
+        ok &= expect(packetizer.open(0, &error), label + "opens: " + error.toStdString());
+        M2tsObject object;
+        int starts = 0;
+        bool startsAtPes = true;
+        std::optional<std::uint64_t> secondStartPtsUs;
+        while (packetizer.readObject(4, &object, &error)) {
+            if (object.startsGroup) {
+                ++starts;
+                const QByteArray head = object.payload.left(188);
+                startsAtPes &= pidOfPacket(head) == groupPid && (static_cast<unsigned char>(head[1]) & 0x40) != 0;
+                if (starts == 2) {
+                    secondStartPtsUs = object.ptsUs;
+                }
+            }
+        }
+        writer.join();
+        ok &= expect(starts >= test.minStarts && starts <= test.maxStarts,
+                     label + "Group starts: " + std::to_string(starts));
+        ok &= expect(startsAtPes, label + "a Group starts at a PES start of the group PID");
+        ok &= expect(packetizer.randomAccess() == (test.kind == "declared"),
+                     label + "mpeg2tsRandomAccess matches what is published");
+        if (test.kind == "single RAP") {
+            ok &= expect(secondStartPtsUs.has_value() && *secondStartPtsUs >= 10000000,
+                         label + "the timer resumes 10 s after the random access point");
+        }
     }
 
     if (ok) {
