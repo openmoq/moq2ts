@@ -21,7 +21,7 @@ enum class AudioCodecPreset {
 inline constexpr qint64 kMaxAuthTokenType = (qint64{1} << 62) - 1;
 
 // The QUIC idle timeout that --quic-idle-timeout and the configuration
-// accept, besides 0: from 1 s, below which every connection attempt times
+// accept, besides 0: from 1 s, below which a connection attempt may time
 // out, to 10 minutes.
 inline constexpr int kMinQuicIdleTimeoutMs = 1000;
 inline constexpr int kMaxQuicIdleTimeoutMs = 600000;

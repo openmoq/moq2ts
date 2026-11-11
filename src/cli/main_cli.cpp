@@ -357,8 +357,8 @@ int main(int argc, char** argv) {
              QStringLiteral("type"), QStringLiteral("16"));
     addValue(QStringLiteral("quic-idle-timeout"),
              QStringLiteral("The QUIC idle timeout offered to the relay, in ms: a relay that vanished, for example "
-                            "after a restart, is noticed within it. It also bounds each connection attempt. 0 "
-                            "keeps the default, 30 s."),
+                            "after a restart, is noticed within it. Below 5000 ms it also shortens each "
+                            "connection attempt. 0 keeps the default, 30 s."),
              QStringLiteral("ms"), QStringLiteral("0"));
     addValue(QStringLiteral("accessible-window"),
              QStringLiteral("Live sources: the window in seconds that the media timeline covers. The catalog declares it as "
