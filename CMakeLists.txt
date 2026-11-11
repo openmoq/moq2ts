@@ -521,6 +521,10 @@ if(UNIX AND NOT APPLE)
         target_link_libraries(moq2ts-relay-unreachable-tests PRIVATE moq2ts-core)
         add_test(NAME moq2ts-relay-unreachable-tests COMMAND moq2ts-relay-unreachable-tests)
         set_tests_properties(moq2ts-relay-unreachable-tests PROPERTIES TIMEOUT 300 LABELS slow)
+        add_executable(moq2ts-quic-idle-timeout-tests tests/quic_idle_timeout_test.cpp)
+        target_include_directories(moq2ts-quic-idle-timeout-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_link_libraries(moq2ts-quic-idle-timeout-tests PRIVATE moq2ts-core)
+        add_test(NAME moq2ts-quic-idle-timeout-tests COMMAND moq2ts-quic-idle-timeout-tests)
     endif()
 
     # LivePipeline on a FIFO with source gaps, as SRT ingest feeds it.

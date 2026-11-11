@@ -81,6 +81,7 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--no-reconnect` | off | Exit when the relay connection ends. By default a live publish (SRT, FIFO, pipe or capture source) connects to the relay again after 2 s, then 2 s longer after each failed attempt up to 60 s, sends the latest catalog, and goes on from the next Group of every track; Group IDs keep increasing. Before any connection has worked, it exits with status 1 on an error that a retry cannot fix, or when 10 attempts fail; after that, it retries every error and logs a permanent one as an error |
 | `--auth-token-file <path>` | - | A file that holds the authorization token that the session setup carries (MOQT AUTHORIZATION TOKEN, sent by value), as raw bytes or as text that starts with `base64:` or `hex:`, as moqx-issuer writes it. moq2ts reads it at each connection, so replace it atomically (write a new file, then rename it over the old one) to rotate the token. A file that cannot be read or used ends the publish with status 1. Prefer `base64:` or `hex:`: raw bytes keep a trailing newline as part of the token. moq2ts never logs it |
 | `--auth-token-type <type>` | `16` | The token type of the authorization token, as the relay expects it (moqx: `auth.token_type`) |
+| `--quic-idle-timeout <ms>` | `0` | The QUIC idle timeout offered to the relay. A relay that vanished, for example after a restart, is noticed within it, so a live publish reconnects sooner. Below 5000 ms it also shortens each connection attempt, so a relay that does not answer fails sooner; above that, moqxr's own 5 s handshake wait applies. `0` keeps the default, 30 s; otherwise from 1000 to 600000. Needs a moqxr with `EndpointConfig::idle_timeout_ms` |
 | `--insecure` | off | Do not verify the relay certificate. By default it is verified against `$SSL_CERT_FILE` or the system CA bundle, so a relay with a self-signed certificate needs this flag; use it for local or test relays only |
 | `--paced` | off | File sources only: pace publishing at media rate instead of as fast as possible |
 | `--width/--height/--fps/--video-bitrate` | 1920/1080/30/2500 | Capture params |
@@ -321,6 +322,7 @@ macOS only; a Windows build rejects it.
 | `relay.insecure` | `false` | As `--insecure`: `true` skips verifying the relay certificate |
 | `relay.auth_token`, `relay.auth_token_file` | - | The authorization token, as a value or as a file (as `--auth-token-file`); at most one of them |
 | `relay.auth_token_type` | `16` | As `--auth-token-type` |
+| `relay.quic_idle_timeout_ms` | `0` | As `--quic-idle-timeout`: 0, or from 1000 to 600000 |
 | `ingest.srt` | - | SRT ingest: `mode` (`listener` or `caller`, default `listener`), `host` (default `0.0.0.0` for a listener, `127.0.0.1` for a caller), `port` (default 9000), `latency_ms` (default 120), as in the `--srt-config` entry |
 | `ingest.path` | - | A FIFO or a pipe. A seekable file is refused: the tracks are live |
 | `programs[].number` | required | The program number in the PAT, from 1 to 65535, listed once |

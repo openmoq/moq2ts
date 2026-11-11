@@ -96,7 +96,7 @@ bool readRelay(const QJsonObject& root, PublishConfig* relay, QString* error) {
         !checkKeys(object, QStringLiteral("relay"),
                    {QStringLiteral("endpoint"), QStringLiteral("namespace"), QStringLiteral("draft"),
                     QStringLiteral("insecure"), QStringLiteral("auth_token"), QStringLiteral("auth_token_file"),
-                    QStringLiteral("auth_token_type")},
+                    QStringLiteral("auth_token_type"), QStringLiteral("quic_idle_timeout_ms")},
                    error) ||
         !readString(object, QStringLiteral("endpoint"), QStringLiteral("relay.endpoint"), true, &relay->moqEndpoint,
                     error) ||
@@ -135,6 +135,17 @@ bool readRelay(const QJsonObject& root, PublishConfig* relay, QString* error) {
         return false;
     }
     relay->authTokenType = static_cast<quint64>(tokenType);
+    qint64 idleTimeoutMs = relay->quicIdleTimeoutMs;
+    if (!readInt(object, QStringLiteral("quic_idle_timeout_ms"), QStringLiteral("relay.quic_idle_timeout_ms"), 0,
+                 kMaxQuicIdleTimeoutMs, false, &idleTimeoutMs, error)) {
+        return false;
+    }
+    if (idleTimeoutMs != 0 && idleTimeoutMs < kMinQuicIdleTimeoutMs) {
+        return fail(error, QStringLiteral("relay.quic_idle_timeout_ms: %1 is neither 0 nor at least %2.")
+                               .arg(idleTimeoutMs)
+                               .arg(kMinQuicIdleTimeoutMs));
+    }
+    relay->quicIdleTimeoutMs = static_cast<int>(idleTimeoutMs);
     const QJsonValue insecure = object.value(QStringLiteral("insecure"));
     if (!insecure.isUndefined()) {
         if (!insecure.isBool()) {

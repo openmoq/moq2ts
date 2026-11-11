@@ -20,6 +20,12 @@ enum class AudioCodecPreset {
 // The largest token type: a MOQT integer holds at most 2^62 - 1.
 inline constexpr qint64 kMaxAuthTokenType = (qint64{1} << 62) - 1;
 
+// The QUIC idle timeout that --quic-idle-timeout and the configuration
+// accept, besides 0: from 1 s, below which a connection attempt may time
+// out, to 10 minutes.
+inline constexpr int kMinQuicIdleTimeoutMs = 1000;
+inline constexpr int kMaxQuicIdleTimeoutMs = 600000;
+
 struct PublishConfig {
     QString moqEndpoint = "mock://local";
     QString namespaceName = "live/paul1";
@@ -67,6 +73,9 @@ struct PublishConfig {
     QByteArray authToken;
     QString authTokenFile;
     quint64 authTokenType = 16;
+    // The QUIC idle timeout offered to the relay, in ms: a relay that vanished
+    // is noticed within it. 0 keeps the moqxr default, 30 s.
+    int quicIdleTimeoutMs = 0;
     // The media timeline track of a live track. The editor's copy of MSF asks a
     // publisher to trim it to the track's accessibleWindowTime; the catalog
     // declares that window, and the timeline keeps the records inside it. 0
