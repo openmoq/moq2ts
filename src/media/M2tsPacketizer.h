@@ -251,6 +251,9 @@ private:
     // The next packet of a live source: what a previous packetizer left
     // unread, then the device.
     QByteArray readSourcePacket();
+    // On a pipe, moves what it holds into m_unread, so one read() serves many
+    // packets.
+    void fillFromPipe();
     // Before the first Object: when the source already skipped ahead, drop
     // what came before the gap, so that the track starts at the live edge.
     void skipToFirstGap();
