@@ -26,8 +26,11 @@ constexpr std::int64_t kPcrHz = 27000000;
 constexpr std::int64_t kPsiWindowPcr = 1 * kPcrHz;    // twice the 500 ms PSI limit of ETSI TR 101 290
 constexpr std::int64_t kRapWindowPcr = 10 * kPcrHz;
 constexpr int kTimedWindowMaxPackets = 600000;
-// A window whose PCR does not advance for this long ends with an error: the
-// packets of about 2 s at 80 Mbit/s, or 2 s of wall time on a slower source.
+// The PSI scan of a live source of one program keeps the packets it reads, so
+// it reads at most its two windows at 80 Mbit/s (about 20 MB).
+constexpr int kLivePsiMaxPackets = 106400;
+// A timed window whose PCR does not advance for this long ends with an error:
+// the packets of about 2 s at 80 Mbit/s, or 2 s of wall time on a slower source.
 constexpr int kPcrStallPackets = 100000;
 constexpr auto kPcrStallTime = std::chrono::seconds(2);
 // The largest step between two PCRs of a PID that counts as time: ISO/IEC
@@ -696,14 +699,23 @@ bool M2tsPacketizer::scanPsi(QString* error) {
         return fail(QStringLiteral("Failed to seek M2TS source while reading the PAT and PMT."));
     }
 
-    // A file, or the source of one program, reads 4096 packets at most. A
-    // program of a live multiplex reads the whole multiplex, so its window is
-    // PCR time.
+    // A file reads 4096 packets at most. A live source waits for the PAT up to
+    // kPsiWindowPcr of PCR time, then for the PMT up to kPsiWindowPcr after the
+    // PAT (ETSI TR 101 290 allows 500 ms between two of each), since a fixed
+    // number of packets is a shorter time at a higher rate. A live source of
+    // one program without an advancing PCR stops at kLivePsiMaxPackets.
     constexpr int maxPacketsToScan = 4096;
     PcrSpan span(-1);
+    std::int64_t patAt = -1;   // PCR time of the first PAT read
     const auto inWindow = [&](int index) {
-        return m_timedStartWindows ? index < kTimedWindowMaxPackets && span.elapsed() < kPsiWindowPcr
-                                   : index < maxPacketsToScan;
+        if (!m_sequential && !m_timedStartWindows) {
+            return index < maxPacketsToScan;
+        }
+        const std::int64_t limit = patAt < 0 ? kPsiWindowPcr : patAt + kPsiWindowPcr;
+        if (m_timedStartWindows) {
+            return index < kTimedWindowMaxPackets && span.elapsed() < limit;
+        }
+        return index < kLivePsiMaxPackets && span.elapsed() < limit;
     };
     for (int index = 0; inWindow(index) && !psiComplete(); ++index) {
         const QByteArray sourcePacket = readSourcePacket();
@@ -725,6 +737,9 @@ bool M2tsPacketizer::scanPsi(QString* error) {
         const QByteArray tsPacket = tsPacketView(sourcePacket);
         span.add(pidOf(tsPacket), tsPacket);
         handlePsiPacket(tsPacket, sourcePacket);
+        if (patAt < 0 && !m_pat.bytes.isEmpty()) {
+            patAt = span.elapsed();
+        }
         if (m_timedStartWindows && !psiComplete() && span.stalled()) {
             return fail(QStringLiteral("No advancing PCR in the live source while reading the PAT and PMT; the "
                                        "start-up windows of a program of a multiplex are PCR time."));
