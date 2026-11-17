@@ -63,12 +63,13 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--namespace <ns>` | `live/ch1` | MOQT track namespace |
 | `--video <path>` | - | TS/M2TS source: seekable file, FIFO, or `/dev/stdin` |
 | `--audio <path>` | - | Alternate single-stream TS source path |
-| `--srt-config <path>` | - | SRT ingest: JSON caller config (see below). Takes the place of `--video`, and implies `--unmodified` |
+| `--srt-config <path>` | - | SRT ingest: JSON caller config (see below). Takes the place of `--video`, and implies `--unmodified` unless `--per-program` is given |
 | `--config <file>` | - | Publish several programs of one live source as per-program tracks, as a JSON configuration states (see "Run: several programs from a JSON configuration"). Takes no other option |
 | `--camera <id>` / `--mic <id>` | - | Capture device ids (instead of a TS source) |
 | `--program <n>` | `0` | Per-program: the MPEG program to carry (0 = first). Unmodified multiplex: the reference program that the catalog names (0 = none) |
 | `--unmodified` | off | Unmodified carriage: forward every source packet unchanged (no PID filter or rewrite). The catalog carries the source PAT and PMT as initialization data. The track is `unmodified-program` for a single-program source and `unmodified-multiplex` otherwise; without a PAT the track is refused |
 | `--transparent`, `--publish-multiplex` | off | Aliases of `--unmodified`; `--transparent` is kept for existing scripts |
+| `--per-program` | off | SRT ingest: per-program carriage instead of unmodified. The track carries the program that `--program` names (0 = the first), without the other PIDs and, unless `--retain-null`, without the null packets; `--si`, `--retain-si`, and `--retain-null` apply. File and pipe sources use this carriage by default. Cannot be combined with `--unmodified` |
 | `--retain-si` | off | Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT). The SDT and the EIT keep the carried service only; the NIT, BAT, TDT, and TOT pass unchanged |
 | `--si <list>` | none | Per-program mode: keep the listed DVB SI tables, a comma-separated list of `nit`, `sdt`, `bat`, `eit-pf`, `eit-schedule`, `tdt-tot`, or `all`. The PIDs are 0x0010 (NIT), 0x0011 (SDT and BAT), 0x0012 (EIT), and 0x0014 (TDT and TOT); the catalog lists them in `mpeg2tsSiPids`. When only one of SDT and BAT (or of `eit-pf` and `eit-schedule`) is listed, the PID is kept and the sections of the other table are dropped. The SDT and the EIT keep the carried service only. Combining `--si` with `--retain-si` is an error; `--retain-si` is the same as `--si all` |
 | `--retain-null` | off | Per-program mode: also keep null (0x1FFF) packets |
@@ -192,13 +193,17 @@ ffmpeg -re -i input.ts -c copy -f mpegts \
   "srt://<publisher-host>:9000?mode=caller&pkt_size=1316"
 ```
 
-**SRT ingest always uses unmodified carriage** (`--publish-multiplex` says so
-explicitly). A contribution feed is forwarded as received, so the per-program
-options (`--retain-si`, `--si`, `--retain-null`) do not apply and are ignored; passing
-them prints a warning. The catalog omits `mpeg2tsMuxRate` for either
-unmodified mode, but `--mux-rate` remains a candidate for catalog `bitrate`
-(see [DEVELOPER.md](DEVELOPER.md)). Use a file or FIFO source if you need
-per-program publishing.
+**SRT ingest uses unmodified carriage by default** (`--publish-multiplex` says so
+explicitly). A contribution feed is then forwarded as received, and the per-program
+options (`--retain-si`, `--si`, `--retain-null`) are ignored with a warning. The catalog
+omits `mpeg2tsMuxRate` for either unmodified mode, but `--mux-rate` remains a candidate
+for catalog `bitrate` (see [DEVELOPER.md](DEVELOPER.md)). With `--per-program`, SRT
+ingest publishes one program instead and drops the null packets unless `--retain-null`.
+On a constant-rate feed they can be a large share of the rate; the catalog declares the
+source's rate in `mpeg2tsMuxRate`, so that a receiver can pad back to it. The catalog
+`bitrate`, an MSF maximum, stays at that rate too, so it overstates the published track
+by the share of the nulls. When the source PAT stops listing the program, as during an
+encoder restart, the track ends and a new session waits for the program.
 
 A two-program test feed, as used to test this path. ffmpeg encodes both programs
 in real time and listens for the publisher on SRT; `-muxrate` pads the multiplex
@@ -487,6 +492,7 @@ no longer produced.
   automatically and advertised as `isLive: true`; VOD duration probing is skipped
   (it would otherwise open and consume the pipe a second time).
 - **Per-program mode over a pipe** works too: the PAT/PMT init scan is buffered and
-  replayed so no leading packets are lost. If the source never emits PAT/PMT within
-  the first ~4096 packets, per-program init fails with a clear error - use
-  `--unmodified` for such feeds.
+  replayed so no leading packets are lost. The scan waits for the PAT up to 1 s of
+  PCR time, then for its PMT up to 1 s after the PAT. A source without a PCR is
+  read up to 106,400 packets, about 20 MB (160 s at 1 Mbit/s). If the tables do not arrive,
+  per-program init fails with a clear error - use `--unmodified` for such feeds.

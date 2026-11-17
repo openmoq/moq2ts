@@ -85,6 +85,44 @@ QByteArray singleProgramStream(int rounds) {
     return ts;
 }
 
+// singleProgramStream() padded to a constant rate, as an encoder's SRT
+// contribution feed is: 20 null packets per round after the 12 others.
+QByteArray constantRateStream(int rounds) {
+    const QByteArray program = singleProgramStream(rounds);
+    const QByteArray null = tb::tsPacket(0x1FFF, false, QByteArray(184, char(0xFF)));
+    QByteArray ts;
+    for (int round = 0; round < rounds; ++round) {
+        ts += program.mid(static_cast<qsizetype>(round) * 12 * 188, 12 * 188);
+        for (int k = 0; k < 20; ++k) {
+            ts += null;
+        }
+    }
+    return ts;
+}
+
+// constantRateStream() whose PAT lists no program, and whose PMT is absent,
+// from round emptyFrom to round emptyTo, as an encoder sends while it restarts.
+// With pcrStops, the PCR is absent too.
+QByteArray restartingStream(int rounds, int emptyFrom, int emptyTo, bool pcrStops = false) {
+    const QByteArray ts = constantRateStream(rounds);
+    const QByteArray emptyPat = tb::psiPacket(0, tb::patSection({}));
+    const QByteArray null = tb::tsPacket(0x1FFF, false, QByteArray(184, char(0xFF)));
+    QByteArray out;
+    const qsizetype roundBytes = 32 * 188;
+    for (int round = 0; round < rounds; ++round) {
+        QByteArray chunk = ts.mid(static_cast<qsizetype>(round) * roundBytes, roundBytes);
+        if (round >= emptyFrom && round < emptyTo) {
+            chunk.replace(0, 188, emptyPat);    // the PAT
+            chunk.replace(188, 188, null);      // the PMT
+            if (pcrStops) {
+                chunk.replace(2 * 188, 188, null);   // the PCR
+            }
+        }
+        out += chunk;
+    }
+    return out;
+}
+
 // The size of the first rounds of singleProgramStream().
 qsizetype roundsBytes(int rounds) {
     return static_cast<qsizetype>(rounds) * 12 * 188;
@@ -136,6 +174,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_catalog = catalog;
+            ++m_sessions;
         }
         while (running.load(std::memory_order_acquire)) {
             std::optional<PublishedObject> object = nextObject();
@@ -167,6 +206,11 @@ public:
         }
         return objects;
     }
+    // The publish sessions LivePipeline started.
+    int sessions() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_sessions;
+    }
     // The catalog the session started with.
     QByteArray catalog() const {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -178,6 +222,7 @@ private:
     mutable std::mutex m_mutex;
     std::vector<PublishedObject> m_sent;
     QByteArray m_catalog;
+    int m_sessions = 0;
 };
 
 QJsonObject catalogTrack(const QByteArray& catalog, const QString& name) {
@@ -351,6 +396,182 @@ int main() {
             ok &= expect(gapPcrSeen && gapPcrMarked && marked == 1,
                          label + "only the first PCR after the gap is marked (" + std::to_string(marked) + ")");
         }
+    }
+
+    // LivePipeline, SRT ingest with --per-program on a constant-rate feed (a
+    // FIFO, as SRT ingest gives it): the track drops the null packets and
+    // declares the source's rate in mpeg2tsMuxRate (MSFTS "Per-Program" and
+    // "Mux Rate"). With --retain-null it keeps them and declares no rate. The
+    // feed sends 32 packets per 0.1 s of PCR time: 481,280 b/s.
+    for (const bool retainNull : {false, true}) {
+        const std::string label = std::string("per-program SRT, constant-rate feed") +
+                                  (retainNull ? ", --retain-null: " : ": ");
+        const QByteArray data = constantRateStream(40);
+        const QString fifo = dir.filePath(retainNull ? "pp-null-kept.fifo" : "pp-null-dropped.fifo");
+        ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
+        std::thread writer([&] {
+            const int fd = openWriter(fifo);
+            if (fd >= 0) {
+                writeAll(fd, data);
+                ::close(fd);
+            }
+        });
+        TestPublisher publisher;
+        PublishConfig cfg;
+        cfg.moqEndpoint = QStringLiteral("mock://local");
+        cfg.videoSource = fifo;
+        cfg.fragmentDurationMs = 0;
+        cfg.targetSegmentBytes = 4 * 188;
+        cfg.sourceGaps = std::make_shared<moq2ts::SourceGapLog>();
+        cfg.retainNullPackets = retainNull;
+        publisher.connect(cfg);
+        moq2ts::LivePipeline pipeline;
+        pipeline.start(cfg, &publisher);
+        const auto deadline = std::chrono::steady_clock::now() + kWait;
+        while (pipeline.running() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        ok &= expect(!pipeline.running(), label + "the pipeline ends with the source");
+        pipeline.stop();
+        writer.join();
+        int nulls = 0;
+        int pats = 0;
+        int pcrs = 0;
+        for (const PublishedObject& object : publisher.sent(QStringLiteral("program-1"))) {
+            for (const QByteArray& packet : packetsOf(object.payload)) {
+                nulls += pidOf(packet) == 0x1FFF ? 1 : 0;
+                pats += pidOf(packet) == 0 ? 1 : 0;
+                pcrs += pidOf(packet) == 0x100 && moq2ts::pcrOf(packet) >= 0 ? 1 : 0;
+            }
+        }
+        const QJsonObject track = catalogTrack(publisher.catalog(), QStringLiteral("program-1"));
+        ok &= expect(track.value(QStringLiteral("mpeg2tsMode")).toString() == QStringLiteral("per-program"),
+                     label + "the track is per-program");
+        ok &= expect(pats > 0 && pcrs > 0, label + "the PAT and the PCR are carried");
+        if (retainNull) {
+            ok &= expect(nulls > 0, label + "the null packets are kept");
+            ok &= expect(!track.contains(QStringLiteral("mpeg2tsMuxRate")), label + "no mpeg2tsMuxRate");
+        } else {
+            ok &= expect(nulls == 0, label + "no null packet is published (" + std::to_string(nulls) + ")");
+            const qint64 muxRate = track.value(QStringLiteral("mpeg2tsMuxRate")).toInteger();
+            ok &= expect(muxRate >= 481000 && muxRate <= 481600,
+                         label + "mpeg2tsMuxRate is the source's rate: " + std::to_string(muxRate));
+        }
+    }
+
+    // LivePipeline, SRT ingest with --per-program: the source PAT lists no
+    // program for a while, as an encoder sends while it restarts, then lists
+    // program 1 again. The track ends and a new session waits for the program
+    // without a deadline, as unmodified carriage goes on; the pipeline reports
+    // no error and publishes again. The empty span is 0.6, 1.5, and 2.5 s, the
+    // last also without a PCR.
+    struct RestartCase {
+        int emptyTo;
+        bool pcrStops;
+    };
+    for (const RestartCase& c : {RestartCase{26, false}, RestartCase{35, false}, RestartCase{45, false},
+                                 RestartCase{45, true}}) {
+        const std::string label = "per-program SRT, encoder restart for " + std::to_string((c.emptyTo - 20) * 100) +
+                                  " ms" + (c.pcrStops ? " without a PCR: " : ": ");
+        const QByteArray data = restartingStream(60, 20, c.emptyTo, c.pcrStops);
+        const QString fifo = dir.filePath(QStringLiteral("pp-restart-%1-%2.fifo").arg(c.emptyTo).arg(c.pcrStops));
+        ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
+        std::thread writer([&] {
+            const int fd = openWriter(fifo);
+            if (fd >= 0) {
+                writeAll(fd, data);
+                ::close(fd);
+            }
+        });
+        {
+            std::lock_guard<std::mutex> lock(g_warningMutex);
+            g_warnings.clear();
+        }
+        TestPublisher publisher;
+        PublishConfig cfg;
+        cfg.moqEndpoint = QStringLiteral("mock://local");
+        cfg.videoSource = fifo;
+        cfg.fragmentDurationMs = 0;
+        cfg.targetSegmentBytes = 4 * 188;
+        cfg.sourceGaps = std::make_shared<moq2ts::SourceGapLog>();
+        publisher.connect(cfg);
+        moq2ts::LivePipeline pipeline;
+        std::atomic<int> errors{0};
+        QObject::connect(&pipeline, &moq2ts::LivePipeline::error, &pipeline,
+                         [&errors](const QString&) { ++errors; }, Qt::DirectConnection);
+        pipeline.start(cfg, &publisher);
+        const auto deadline = std::chrono::steady_clock::now() + kWait;
+        while (pipeline.running() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        ok &= expect(!pipeline.running(), label + "the pipeline ends with the source");
+        pipeline.stop();
+        writer.join();
+        // The second session's track is program-2 (LivePipeline numbers them).
+        bool after = false;
+        for (const PublishedObject& object : publisher.sent(QStringLiteral("program-2"))) {
+            for (const QByteArray& packet : packetsOf(object.payload)) {
+                after = after || (pidOf(packet) == 0x100 && moq2ts::pcrOf(packet) >= 0 && roundOf(packet) >= c.emptyTo);
+            }
+        }
+        QStringList waits;
+        {
+            std::lock_guard<std::mutex> lock(g_warningMutex);
+            waits = g_warnings.filter(QStringLiteral("waiting for"));
+        }
+        ok &= expect(errors.load() == 0, label + "no error (" + std::to_string(errors.load()) + ")");
+        ok &= expect(publisher.sessions() == 2, label + "a second session (" + std::to_string(publisher.sessions()) + ")");
+        ok &= expect(after, label + "publishes again after the restart");
+        ok &= expect(waits.size() <= 1, label + "at most one waiting line (" + std::to_string(waits.size()) + ")");
+    }
+
+    // An interrupt while the new session waits for the program, as on SIGINT,
+    // which stops the pipeline and then closes the SRT pipe, is not an error.
+    {
+        const std::string label = "per-program SRT, interrupt during the restart wait: ";
+        const QByteArray data = restartingStream(30, 20, 30);
+        const QString fifo = dir.filePath(QStringLiteral("pp-interrupt.fifo"));
+        ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
+        std::atomic<int> writerFd{-1};
+        std::thread writer([&] {
+            const int fd = openWriter(fifo);
+            if (fd >= 0) {
+                writeAll(fd, data);
+            }
+            writerFd.store(fd);
+        });
+        {
+            std::lock_guard<std::mutex> lock(g_warningMutex);
+            g_warnings.clear();
+        }
+        TestPublisher publisher;
+        PublishConfig cfg;
+        cfg.moqEndpoint = QStringLiteral("mock://local");
+        cfg.videoSource = fifo;
+        cfg.fragmentDurationMs = 0;
+        cfg.targetSegmentBytes = 4 * 188;
+        cfg.sourceGaps = std::make_shared<moq2ts::SourceGapLog>();
+        publisher.connect(cfg);
+        moq2ts::LivePipeline pipeline;
+        std::atomic<int> errors{0};
+        QObject::connect(&pipeline, &moq2ts::LivePipeline::error, &pipeline,
+                         [&errors](const QString&) { ++errors; }, Qt::DirectConnection);
+        pipeline.start(cfg, &publisher);
+        bool waiting = false;
+        const auto deadline = std::chrono::steady_clock::now() + kWait;
+        while (!waiting && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::lock_guard<std::mutex> lock(g_warningMutex);
+            waiting = !g_warnings.filter(QStringLiteral("waiting for")).isEmpty();
+        }
+        pipeline.requestStop();
+        writer.join();
+        if (writerFd.load() >= 0) {
+            ::close(writerFd.load());
+        }
+        pipeline.stop();
+        ok &= expect(waiting, label + "the new session waits");
+        ok &= expect(errors.load() == 0, label + "no error (" + std::to_string(errors.load()) + ")");
     }
 
     std::cerr << (ok ? "OK\n" : "FAILED\n");
