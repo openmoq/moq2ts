@@ -214,6 +214,7 @@ set(CORE_HEADERS
     src/media/LibavPreviewWorker.h
     src/media/M2tsPacketizer.h
     src/media/SiTables.h
+    src/media/SrtCarriage.h
     src/media/MsftsMuxer.h
     src/publish/MoqxrPublisher.h
     src/publish/ObjectLookahead.h
@@ -578,4 +579,9 @@ if(UNIX AND NOT APPLE AND MOQ2TS_MPTS_BUILT)
     target_include_directories(moq2ts-publisher-spec-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(moq2ts-publisher-spec-tests PRIVATE moq2ts-core)
     add_test(NAME moq2ts-publisher-spec-tests COMMAND moq2ts-publisher-spec-tests)
+
+    add_executable(moq2ts-srt-carriage-tests tests/srt_carriage_test.cpp)
+    target_include_directories(moq2ts-srt-carriage-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-srt-carriage-tests PRIVATE moq2ts-core)
+    add_test(NAME moq2ts-srt-carriage-tests COMMAND moq2ts-srt-carriage-tests)
 endif()

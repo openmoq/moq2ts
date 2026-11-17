@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #include "media/SourceGapLog.h"
+#include "media/SrtCarriage.h"
 #include "media/SrtSource.h"
 #endif
 
@@ -335,6 +336,10 @@ int main(int argc, char** argv) {
                        "unmodified-program for a single-program source and unmodified-multiplex "
                        "otherwise. --transparent and --publish-multiplex are aliases; SRT ingest "
                        "uses this carriage by default.")));
+    parser.addOption(QCommandLineOption(QStringLiteral("per-program"),
+        QStringLiteral("Per-program carriage on SRT ingest: publish the program that --program names (0 = the "
+                       "first) and drop the other PIDs and the null packets, unless --retain-null. File and "
+                       "pipe sources use this carriage by default.")));
     parser.addOption(QCommandLineOption(QStringLiteral("paced"),
         QStringLiteral("Pace file-source publishing at media-time rate (prevents dumping all data at wire speed).")));
     addValue(QStringLiteral("draft"), QStringLiteral("MOQT transport draft version: 14, 16, 17, 18, 21 or 22. The relay must list it."),
@@ -429,6 +434,11 @@ int main(int argc, char** argv) {
     cfg.programNumber = parser.value(QStringLiteral("program")).toInt();
     cfg.mpeg2tsMuxRateBps = parser.value(QStringLiteral("mux-rate")).toInt();
     cfg.transparentMode = parser.isSet(QStringLiteral("unmodified"));
+    const bool perProgram = parser.isSet(QStringLiteral("per-program"));
+    if (perProgram && cfg.transparentMode) {
+        logLine(stderr, "error", QStringLiteral("--per-program and --unmodified name two different carriages."));
+        return 2;
+    }
     cfg.pacedFileSource = parser.isSet(QStringLiteral("paced"));
     cfg.draftVersion = parser.value(QStringLiteral("draft")).toInt();
     cfg.insecure = parser.isSet(QStringLiteral("insecure"));
@@ -584,33 +594,23 @@ int main(int argc, char** argv) {
 
         // SRT is a live source - no pacing needed (real-time from encoder)
         cfg.pacedFileSource = false;
-        // Force unmodified carriage for SRT. An SRT contribution feed is forwarded
-        // as received, so deriving one program from it is not what this path is
-        // for. Say so rather than overriding in silence: the per-program options
-        // otherwise appear to be accepted and then do nothing, which is
-        // indistinguishable from a bug in the filter itself.
-        if (!cfg.transparentMode) {
-            QStringList ignored;
-            if (retainSi) {
-                ignored << QStringLiteral("--retain-si");
-            } else if (!cfg.siTables.isEmpty()) {
-                ignored << QStringLiteral("--si");
-            }
-            if (cfg.retainNullPackets) {
-                ignored << QStringLiteral("--retain-null");
-            }
-            if (!ignored.isEmpty()) {
-                logLine(stderr, "warn",
-                        QStringLiteral("%1 %2 only meaningful in per-program mode; SRT ingest always "
-                                       "forwards the source unmodified, so %3 ignored.")
-                            .arg(ignored.join(QStringLiteral(", ")),
-                                 ignored.size() == 1 ? QStringLiteral("is") : QStringLiteral("are"),
-                                 ignored.size() == 1 ? QStringLiteral("it is") : QStringLiteral("they are")));
-            }
+        // SRT ingest forwards the source unmodified unless --per-program asks for
+        // one program without the null packets. Say so rather than overriding in
+        // silence: the per-program options otherwise appear to be accepted and
+        // then do nothing, which is indistinguishable from a bug in the filter.
+        const moq2ts::SrtCarriage carriage = moq2ts::srtCarriage(perProgram, cfg.transparentMode, retainSi,
+                                                                 !cfg.siTables.isEmpty(), cfg.retainNullPackets);
+        if (!carriage.warning.isEmpty()) {
+            logLine(stderr, "warn", carriage.warning);
         }
-        cfg.transparentMode = true;
+        cfg.transparentMode = cfg.transparentMode || carriage.unmodified;
     }
 #endif  // MOQ2TS_HAS_SRT
+
+    if (perProgram && !useSrt) {
+        logLine(stderr, "warn", QStringLiteral("--per-program only changes SRT ingest; other sources use per-program "
+                                               "carriage by default."));
+    }
 
     // Validation mirrors the GUI guards.
     const bool hasSource = useSrt || !cfg.videoSource.isEmpty() || !cfg.audioSource.isEmpty() ||

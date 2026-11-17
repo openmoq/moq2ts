@@ -407,6 +407,8 @@ private:
     int m_prebufferPos = 0;
     // What the previous packetizer of the source read but did not use.
     QByteArray m_unread;
+    // Started by continueFrom(): a session after a PAT change.
+    bool m_continued = false;
     qsizetype m_unreadPos = 0;
 
     // Gaps of a live source. m_sourceOffset is the offset of the next source

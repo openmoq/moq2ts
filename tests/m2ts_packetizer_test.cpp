@@ -1737,6 +1737,64 @@ int main() {
         }
     }
 
+    // A per-program session that a PAT change started (continueFrom) waits for
+    // the program without a deadline and keeps nothing before the PAT that
+    // lists it: 3 s of an empty PAT at 40 Mbit/s leave less than 1 s of
+    // stream in the prebuffer.
+    {
+        QByteArray first;
+        first += tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+        first += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+        first += pcrPacket(0x100, 0, 0);
+        first += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(0), 1, 0x40);
+        for (int k = 0; k < 4; ++k) {
+            first += pcrPacket(0x100, static_cast<std::int64_t>((k + 1) * 0.3 * 27e6), 2 + k);
+        }
+        M2tsPacketizer previous(std::make_shared<SequentialDevice>(first), QStringLiteral("live"));
+        QString error;
+        ok &= expect(previous.open(1, &error), "restart wait: the first session opens: " + error.toStdString());
+        M2tsObject drained;
+        while (previous.readObject(4, &drained, &error)) {
+        }   // the first session read its whole stream, as a session ends at the PAT change
+
+        QByteArray ts;
+        int videoCc = 0;
+        int psiCc = 0;
+        for (int step = 0; step < 200; ++step) {   // 4 s: an empty PAT for 3 s, then program 1
+            const double t = step * 0.02;
+            const bool empty = t < 3.0;
+            ts += pcrPacket(0x100, static_cast<std::int64_t>(t * 27e6), videoCc++);
+            int left = 531;
+            if (step % 24 == 0) {
+                ts += empty ? tb::psiPacket(0x0000, tb::patSection({}), psiCc)
+                            : tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}), psiCc);
+                ts += empty ? tb::tsPacket(0x1FFF, false, QByteArray(184, char(0xFF)))
+                            : tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}), psiCc);
+                ++psiCc;
+                left -= 2;
+            }
+            for (int k = 0; k < left; ++k) {
+                ts += tb::tsPacket(0x100, false, QByteArray(184, char(k)), videoCc++);
+            }
+        }
+        M2tsPacketizer next(std::make_shared<SequentialDevice>(ts), QStringLiteral("live"));
+        next.continueFrom(previous);
+        ok &= expect(next.open(1, &error), "restart wait: the next session opens once the program is back: " +
+                                               error.toStdString());
+        ok &= expect(next.pcrPid() == 0x100, "restart wait: the PMT is read");
+        ok &= expect(next.prebufferedBytes() < 26600 * 188,
+                     "restart wait: less than 1 s kept, " + std::to_string(next.prebufferedBytes() / 188) + " packets");
+
+        // The source ends during the wait: open() fails, and the wait kept
+        // nothing of the 3 s it read.
+        M2tsPacketizer ended(std::make_shared<SequentialDevice>(ts.left(150 * 532 * 188)), QStringLiteral("live"));
+        ended.continueFrom(previous);
+        ok &= expect(!ended.open(1, &error), "restart wait: a source that ends during the wait fails");
+        ok &= expect(ended.prebufferedBytes() < 10 * 188,
+                     "restart wait: nothing kept while waiting, " + std::to_string(ended.prebufferedBytes() / 188) +
+                         " packets");
+    }
+
     // The scan keeps what it reads, so a live source whose PCR never ends the
     // window (none at all, or one that advances too slowly) stops at the
     // packet cap (106,400 packets).

@@ -75,7 +75,7 @@ private:
     int m_pid = -1;
     std::int64_t m_last = -1;
     std::int64_t m_elapsed = 0;
-    int m_sinceAdvance = 0;
+    std::int64_t m_sinceAdvance = 0;
     std::chrono::steady_clock::time_point m_lastAdvance;
 };
 
@@ -706,18 +706,30 @@ bool M2tsPacketizer::scanPsi(QString* error) {
     // one program without an advancing PCR stops at kLivePsiMaxPackets.
     constexpr int maxPacketsToScan = 4096;
     PcrSpan span(-1);
-    std::int64_t patAt = -1;   // PCR time of the first PAT read
-    const auto inWindow = [&](int index) {
+    std::int64_t patAt = -1;   // PCR time of the first PAT that lists the program
+    qsizetype skipBefore = 0;  // prebuffered bytes before that PAT, dropped at the end
+    // A per-program session that a PAT change started waits for the program
+    // without a deadline, as unmodified carriage goes on through an encoder
+    // restart. It keeps nothing before the PAT that lists the program, and its
+    // window starts there.
+    const bool waitForProgram = m_continued && !m_transparent && m_sequential && !m_timedStartWindows;
+    bool waitLogged = false;
+    std::int64_t windowStart = 0;   // index of the packet that the window counts from
+    const auto inWindow = [&](std::int64_t index) {
         if (!m_sequential && !m_timedStartWindows) {
             return index < maxPacketsToScan;
+        }
+        if (waitForProgram && m_pmtPid < 0) {
+            return true;
         }
         const std::int64_t limit = patAt < 0 ? kPsiWindowPcr : patAt + kPsiWindowPcr;
         if (m_timedStartWindows) {
             return index < kTimedWindowMaxPackets && span.elapsed() < limit;
         }
-        return index < kLivePsiMaxPackets && span.elapsed() < limit;
+        return index - windowStart < kLivePsiMaxPackets && span.elapsed() < limit;
     };
-    for (int index = 0; inWindow(index) && !psiComplete(); ++index) {
+    // 64 bits: a restarted session's wait has no deadline.
+    for (std::int64_t index = 0; inWindow(index) && !psiComplete(); ++index) {
         const QByteArray sourcePacket = readSourcePacket();
         if (sourcePacket.size() != m_packetSize) {
             break;
@@ -736,14 +748,37 @@ bool M2tsPacketizer::scanPsi(QString* error) {
         }
         const QByteArray tsPacket = tsPacketView(sourcePacket);
         span.add(pidOf(tsPacket), tsPacket);
+        const bool patWithoutProgram = !m_pat.bytes.isEmpty() && m_pmtPid < 0;
         handlePsiPacket(tsPacket, sourcePacket);
-        if (patAt < 0 && !m_pat.bytes.isEmpty()) {
+        if (waitForProgram && m_pmtPid < 0) {
+            // Still waiting: drop the packet, so the wait holds no memory.
+            m_prebuffer.chop(m_packetSize);
+            m_sourceOffset += static_cast<std::uint64_t>(m_packetSize);
+            if (!waitLogged) {
+                qWarning("%s: waiting for %s in the source PAT.", qUtf8Printable(m_label),
+                         m_requestedProgramNumber ? qUtf8Printable(QStringLiteral("program %1").arg(m_requestedProgramNumber))
+                                                  : "a program");
+                waitLogged = true;
+            }
+            continue;
+        }
+        if (patAt < 0 && m_pmtPid >= 0) {
+            windowStart = index;
             patAt = span.elapsed();
+            // Per-program carriage waited for this PAT: what came before it
+            // lists no program, and replaying it would end the track again.
+            if (patWithoutProgram && !m_transparent && m_sequential && !m_timedStartWindows) {
+                skipBefore = m_prebuffer.size() - m_packetSize;
+            }
         }
         if (m_timedStartWindows && !psiComplete() && span.stalled()) {
             return fail(QStringLiteral("No advancing PCR in the live source while reading the PAT and PMT; the "
                                        "start-up windows of a program of a multiplex are PCR time."));
         }
+    }
+    if (skipBefore > 0) {
+        m_prebuffer.remove(0, skipBefore);
+        m_sourceOffset += static_cast<std::uint64_t>(skipBefore);
     }
     // Non-seekable sources keep their forward-only position; readObject drains the
     // prebuffer captured above.
@@ -780,8 +815,10 @@ void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
         return;
     }
     // The first PAT sets the mode at open(). A later one is a change during the
-    // session, which readObject meets when it reads the source again.
-    if (!m_opened && !m_pat.bytes.isEmpty()) {
+    // session, which readObject meets when it reads the source again. In
+    // per-program carriage, open() waits for a PAT that lists the program, as
+    // after an encoder restart that sends an empty PAT first.
+    if (!m_opened && !m_pat.bytes.isEmpty() && (m_transparent || m_pmtPid >= 0)) {
         return;
     }
     // A large PAT spans several sections. It applies once sections 0 to
@@ -863,7 +900,9 @@ void M2tsPacketizer::onPat(const PsiAssembler::Section& section) {
         return;
     }
     if (!m_transparent && !listed) {
-        // Draft "Per-Program": the publisher SHOULD end the track.
+        // Draft "Per-Program": the publisher SHOULD end the track. A live
+        // source goes on in a new session, which waits for the program.
+        m_patRestart = m_sequential;
         endTrack(QStringLiteral("Program %1 left the source PAT; the track ends.").arg(m_programNumber));
         return;
     }
@@ -1851,6 +1890,7 @@ std::shared_ptr<QIODevice> M2tsPacketizer::device() const {
 }
 
 void M2tsPacketizer::continueFrom(const M2tsPacketizer& previous) {
+    m_continued = true;
     m_packetSize = previous.m_packetSize;
     // m_sourceOffset counts the packets taken from the prebuffer, so it is
     // the offset of the first unread one.

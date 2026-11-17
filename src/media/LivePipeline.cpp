@@ -403,7 +403,10 @@ void LivePipeline::runLoop() {
         packetizer.setSourceGaps(m_config.sourceGaps);
         QString packetizerError;
         if (!packetizer.open(m_config.programNumber, &packetizerError)) {
-            emit error(packetizerError);
+            // An interrupt closes the SRT pipe after it clears m_running.
+            if (m_running.load(std::memory_order_acquire)) {
+                emit error(packetizerError);
+            }
             m_running.store(false, std::memory_order_release);
             return;
         }
