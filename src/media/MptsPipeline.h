@@ -38,6 +38,9 @@ struct MptsConfig {
     int targetSegmentBytes = 64 * 1024;
     // Where SRT ingest skipped ahead in the source; null outside SRT ingest.
     std::shared_ptr<SourceGapLog> sourceGaps;
+    // A program that does not open at start-up fails every program. Without
+    // it, the others publish and programEnded() reports that one.
+    bool strictStart = false;
 };
 
 // Publishes several programs of one live multi-program source in one MOQT
@@ -63,8 +66,8 @@ public:
     ~MptsPipeline() override;
 
     // Starts the pipeline on a thread of its own and returns. Start-up errors
-    // (a seekable source, a program missing from the PAT) come as error(), and
-    // running() then turns false. The publisher (a MoqxrPublisher, or a
+    // (a seekable source, no program open, or with strictStart one program not
+    // open) come as error(), and running() then turns false. The publisher (a MoqxrPublisher, or a
     // stand-in in tests) must be connected.
     void start(const PublishConfig& relay, const MptsConfig& config, IMoqOutput* publisher);
     // Stops the source, the workers, and the publish loop, and joins them. A
@@ -82,8 +85,9 @@ signals:
     void status(const QString& message);
     // A start-up or publish error, which ends the pipeline.
     void error(const QString& message);
-    // A read error of one program, which ends that program's track only; the
-    // session goes on with the other programs.
+    // A program that did not open at start-up, or a read error of one program,
+    // which ends that program's track only; the session goes on with the
+    // other programs.
     void programEnded(int program, const QString& reason);
     // The publisher's first pull: every program queue dropped what it held,
     // so what the source sends from now on is what the tracks start with.

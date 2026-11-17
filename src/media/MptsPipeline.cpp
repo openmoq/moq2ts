@@ -405,20 +405,43 @@ void MptsPipeline::run() {
             opener.join();
         }
     }
+    // A program that did not open is left out and reported, and the others
+    // publish. Strict start, or no program open, fails as one error.
+    std::vector<std::unique_ptr<Program>> openPrograms;
+    QStringList notOpened;
     for (std::size_t index = 0; index < programs.size(); ++index) {
         Program* program = programs[index].get();
         const M2tsPacketizer& packetizer = *program->packetizer;
         if (!programOpened[index]) {
             // A PAT that was read and does not list the program.
-            if (packetizer.patProgramCount() > 0 && packetizer.pmtPid() < 0) {
-                fail(QStringLiteral("program %1 is not in the source PAT").arg(program->config.programNumber));
-            } else {
-                fail(QStringLiteral("program %1: %2").arg(program->config.programNumber).arg(openErrors[index]));
+            const QString why = packetizer.patProgramCount() > 0 && packetizer.pmtPid() < 0
+                                    ? QStringLiteral("program %1 is not in the source PAT").arg(program->config.programNumber)
+                                    : QStringLiteral("program %1: %2").arg(program->config.programNumber).arg(openErrors[index]);
+            if (m_config.strictStart) {
+                fail(why);
+                return;
             }
-            return;
+            notOpened.append(why);
+            continue;
         }
         program->packetsPerObject = std::max(1, m_config.targetSegmentBytes / packetizer.packetSize());
+        openPrograms.push_back(std::move(programs[index]));
     }
+    if (openPrograms.empty()) {
+        fail(notOpened.front());
+        return;
+    }
+    for (std::size_t index = 0; index < programs.size(); ++index) {
+        if (programs[index]) {
+            QString reason = notOpened.takeFirst();
+            if (!reason.endsWith(QLatin1Char('.'))) {
+                reason += QLatin1Char('.');
+            }
+            emit programEnded(programs[index]->config.programNumber,
+                              reason + QStringLiteral(" The other programs publish without it."));
+        }
+    }
+    programs = std::move(openPrograms);
 
     // One catalog entry per program, as LivePipeline builds a live per-program
     // track.

@@ -153,6 +153,7 @@ int runConfig(QCoreApplication& app, const QString& path) {
     mpts.sourcePath = spec.sourcePath;
     mpts.programs = spec.programs;
     mpts.targetSegmentBytes = spec.segmentBytes;
+    mpts.strictStart = spec.strictStart;
 
     const bool useSrt = !spec.srt.mode.isEmpty();
 #ifndef MOQ2TS_HAS_SRT
