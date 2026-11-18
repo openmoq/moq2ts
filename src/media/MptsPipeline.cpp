@@ -63,6 +63,7 @@ struct MptsPipeline::Shared {
     int liveWorkers = 0;
     bool stopping = false;
     QList<MsftsCatalog> catalogs;   // one per program, in configuration order
+    std::vector<bool> listed;       // per program: opened, so in the catalog
     QByteArray catalogJson;
     std::uint64_t catalogGroupId = 0;
     // The queue of each program, and from the first pull on, the offset in
@@ -162,11 +163,12 @@ struct MptsPipeline::Shared {
     // interrupt, which commit to nothing about the content that follows.
     // moqxr ends every other track before it sends this one.
     std::optional<PublishedObject> endBroadcast() {
-        if (unclean || broadcastEnded || catalogs.isEmpty() || !catalogs.first().isLive) {
+        const QList<MsftsCatalog> current = listedCatalogs();
+        if (unclean || broadcastEnded || current.isEmpty() || !current.first().isLive) {
             return std::nullopt;
         }
         broadcastEnded = true;
-        MsftsCatalog closing = catalogs.first();
+        MsftsCatalog closing = current.first();
         closing.generatedAtMs = QDateTime::currentMSecsSinceEpoch();
         PublishedObject catalog;
         catalog.trackName = QLatin1String(kCatalogTrackName);
@@ -177,6 +179,33 @@ struct MptsPipeline::Shared {
         catalog.finalInGroup = true;
         catalog.endsBroadcast = true;
         return catalog;
+    }
+
+    // The catalog entries of the programs that opened, in configuration order.
+    QList<MsftsCatalog> listedCatalogs() const {
+        QList<MsftsCatalog> current;
+        for (qsizetype index = 0; index < catalogs.size(); ++index) {
+            if (listed[static_cast<std::size_t>(index)]) {
+                current.append(catalogs[index]);
+            }
+        }
+        return current;
+    }
+
+    // A program that opened late joins the catalog: a new catalog in the next
+    // catalog Group, before any of its Objects, as a PSI change. Waits for
+    // room; false once stopping.
+    bool join(int program, const MsftsCatalog& entry) {
+        std::unique_lock<std::mutex> lock(mutex);
+        notFull.wait(lock, [&] { return stopping || queue.size() + 1 <= capacity; });
+        if (stopping) {
+            return false;
+        }
+        catalogs[program] = entry;
+        listed[static_cast<std::size_t>(program)] = true;
+        queue.push_back(updateCatalog(program, entry.initData));
+        notEmpty.notify_one();
+        return true;
     }
 
     void workerEnded(bool clean) {
@@ -202,7 +231,7 @@ struct MptsPipeline::Shared {
         for (MsftsCatalog& catalog : catalogs) {
             catalog.generatedAtMs = now;
         }
-        catalogJson = MsftsMuxer::catalogJson(catalogs);
+        catalogJson = MsftsMuxer::catalogJson(listedCatalogs());
         PublishedObject catalog;
         catalog.trackName = QLatin1String(kCatalogTrackName);
         catalog.payload = catalogJson;
@@ -379,6 +408,24 @@ void MptsPipeline::run() {
         return;
     }
 
+    // A packetizer for a program's queue, one per open attempt.
+    const auto newPacketizer = [](Program* program) {
+        auto packetizer = std::make_shared<M2tsPacketizer>(program->device, program->track);
+        // Draft "Per-Program": the program's own SI selection, none when empty.
+        packetizer->setSiTables(program->config.siTables);
+        packetizer->setSourceGaps(program->device->gaps());
+        // It reads the whole multiplex, so its start-up windows are PCR time.
+        packetizer->setTimedStartWindows(true);
+        return packetizer;
+    };
+    // Why a program did not open.
+    const auto openFailure = [](const Program& program, const QString& error) {
+        // A PAT that was read and does not list the program.
+        return program.packetizer->patProgramCount() > 0 && program.packetizer->pmtPid() < 0
+                   ? QStringLiteral("program %1 is not in the source PAT").arg(program.config.programNumber)
+                   : QStringLiteral("program %1: %2").arg(program.config.programNumber).arg(error);
+    };
+
     // Every program opens at once, each on a thread of its own: an open reads
     // up to 10 s of the source for a random access point, and one after the
     // other, they would add up while the program queues not yet read drop
@@ -390,13 +437,7 @@ void MptsPipeline::run() {
         std::vector<std::thread> openers;
         for (std::size_t index = 0; index < programs.size(); ++index) {
             Program* program = programs[index].get();
-            auto packetizer = std::make_shared<M2tsPacketizer>(program->device, program->track);
-            // Draft "Per-Program": the program's own SI selection, none when empty.
-            packetizer->setSiTables(program->config.siTables);
-            packetizer->setSourceGaps(program->device->gaps());
-            // It reads the whole multiplex, so its start-up windows are PCR time.
-            packetizer->setTimedStartWindows(true);
-            program->packetizer = packetizer;
+            program->packetizer = newPacketizer(program);
             openers.emplace_back([program, &openErrors, &programOpened, index] {
                 programOpened[index] = program->packetizer->open(program->config.programNumber, &openErrors[index]);
             });
@@ -405,49 +446,37 @@ void MptsPipeline::run() {
             opener.join();
         }
     }
-    // A program that did not open is left out and reported, and the others
-    // publish. Strict start, or no program open, fails as one error.
-    std::vector<std::unique_ptr<Program>> openPrograms;
-    QStringList notOpened;
+    // A program that did not open keeps waiting for its PAT and PMT, and joins
+    // the catalog when it opens; the others publish now. Strict start, or no
+    // program open, fails as one error.
+    std::vector<QString> notOpened(programs.size());
     for (std::size_t index = 0; index < programs.size(); ++index) {
-        Program* program = programs[index].get();
-        const M2tsPacketizer& packetizer = *program->packetizer;
         if (!programOpened[index]) {
-            // A PAT that was read and does not list the program.
-            const QString why = packetizer.patProgramCount() > 0 && packetizer.pmtPid() < 0
-                                    ? QStringLiteral("program %1 is not in the source PAT").arg(program->config.programNumber)
-                                    : QStringLiteral("program %1: %2").arg(program->config.programNumber).arg(openErrors[index]);
+            notOpened[index] = openFailure(*programs[index], openErrors[index]);
             if (m_config.strictStart) {
-                fail(why);
+                fail(notOpened[index]);
                 return;
             }
-            notOpened.append(why);
-            continue;
         }
-        program->packetsPerObject = std::max(1, m_config.targetSegmentBytes / packetizer.packetSize());
-        openPrograms.push_back(std::move(programs[index]));
     }
-    if (openPrograms.empty()) {
+    if (std::find(programOpened.begin(), programOpened.end(), 1) == programOpened.end()) {
         fail(notOpened.front());
         return;
     }
     for (std::size_t index = 0; index < programs.size(); ++index) {
-        if (programs[index]) {
-            QString reason = notOpened.takeFirst();
+        if (!programOpened[index]) {
+            QString reason = notOpened[index];
             if (!reason.endsWith(QLatin1Char('.'))) {
                 reason += QLatin1Char('.');
             }
-            emit programEnded(programs[index]->config.programNumber,
-                              reason + QStringLiteral(" The other programs publish without it."));
+            emit status(reason + QStringLiteral(" It joins the catalog when it opens."));
         }
     }
-    programs = std::move(openPrograms);
 
-    // One catalog entry per program, as LivePipeline builds a live per-program
-    // track.
-    const qint64 generatedAtMs = QDateTime::currentMSecsSinceEpoch();
-    QList<MsftsCatalog> catalogs;
-    for (const std::unique_ptr<Program>& program : programs) {
+    // A program's catalog entry, once it opened, as LivePipeline builds a live
+    // per-program track.
+    const auto catalogEntry = [this](Program* program, qint64 generatedAtMs) {
+        program->packetsPerObject = std::max(1, m_config.targetSegmentBytes / program->packetizer->packetSize());
         const M2tsPacketizer& packetizer = *program->packetizer;
         // MSFTS 6.7: the configured rate, or one worked out above the rate
         // measured at start-up.
@@ -480,17 +509,27 @@ void MptsPipeline::run() {
                      "PCR. Give the program a mux rate to declare both.",
                      program->config.programNumber);
         }
-        catalogs.append(entry);
         emit status(QStringLiteral("per-program track %1: PCR PID %2, mpeg2tsMuxRate %3 bit/s.")
                         .arg(program->track)
                         .arg(packetizer.pcrPid())
                         .arg(muxRate));
-    }
-    const QByteArray catalog = MsftsMuxer::catalogJson(catalogs);
+        return entry;
+    };
+    const qint64 generatedAtMs = QDateTime::currentMSecsSinceEpoch();
+    QByteArray catalog;
     {
+        QList<MsftsCatalog> catalogs;
+        std::vector<bool> listed;
+        for (std::size_t index = 0; index < programs.size(); ++index) {
+            catalogs.append(programOpened[index] ? catalogEntry(programs[index].get(), generatedAtMs) : MsftsCatalog());
+            listed.push_back(programOpened[index] != 0);
+        }
         std::lock_guard<std::mutex> lock(shared->mutex);
         shared->catalogs = catalogs;
-        shared->catalogJson = catalog;
+        shared->listed = listed;
+        shared->catalogJson = MsftsMuxer::catalogJson(shared->listedCatalogs());
+        catalog = shared->catalogJson;
+        // A program still waiting to open counts as live until it ends.
         shared->liveWorkers = static_cast<int>(programs.size());
         shared->capacity = kMergedQueueSlotsPerProgram * programs.size();
         for (const std::unique_ptr<Program>& program : programs) {
@@ -500,70 +539,115 @@ void MptsPipeline::run() {
         shared->liveStarted.assign(programs.size(), false);
     }
 
+    // A program's worker: its Objects go into the merged queue until its
+    // source ends, it fails, or the pipeline stops.
     const std::uint64_t fragmentUs = static_cast<std::uint64_t>(m_relay.fragmentDurationMs) * 1000ULL;
+    const auto runProgram = [this, shared, fragmentUs](Program* program, int index) {
+        QString readError;
+        while (true) {
+            M2tsObject object;
+            if (!program->packetizer->readObject(program->packetsPerObject, &object, &readError)) {
+                break;
+            }
+            PublishedObject published;
+            published.trackName = program->track;
+            published.payload = std::move(object.payload);
+            published.groupId = object.groupId;
+            published.objectId = object.objectId;
+            published.startsGroup = object.startsGroup;
+            published.mediaTimeUs = static_cast<std::uint64_t>(program->objects) * fragmentUs;
+            published.mediaDurationUs = fragmentUs;
+            ++program->objects;
+            // Draft "Use of MSF Initialization Data": the new initData
+            // reaches the catalog before the Objects that rely on the
+            // changed PSI, this one first.
+            QByteArray initData;
+            const bool initDataChanged = program->packetizer->takeInitDataChange(&initData);
+            const Shared::Pushed pushed =
+                shared->push(index, {published}, initDataChanged ? &initData : nullptr, object.sourceOffset, true);
+            if (pushed == Shared::Pushed::Stopped) {
+                break;
+            }
+            if (pushed == Shared::Pushed::Dropped) {
+                continue;
+            }
+            // The timeline history records the Groups that went out: none
+            // from before the first pull.
+            if (pushed == Shared::Pushed::QueuedFirstLive) {
+                program->timeline = TimelineHistory();
+            }
+            // One timeline record per media Group, for its first Object
+            // that starts a video PES, with that PES's PTS (MSF 7.1.1). It
+            // follows the media Object it records, and goes with it when
+            // the first pull comes in between and drops it.
+            if (!program->timelineTrack.isEmpty() && object.ptsUs.has_value() &&
+                program->timeline.lastGroupId != published.groupId &&
+                shared->push(index, {timelineObject(&program->timeline, program->timelineTrack, published,
+                                                    *object.ptsUs, nowUnixUs(), nowSteadyUs(),
+                                                    m_relay.accessibleWindowMs)},
+                             nullptr, object.sourceOffset, false) == Shared::Pushed::Stopped) {
+                break;
+            }
+        }
+        // The track has no more Objects: its last one closes its Group
+        // now, rather than when the session ends. Timeline Objects are
+        // each final in their Group, so that track needs no marker. The
+        // marker is queued before programEnded() reports why the track ended.
+        PublishedObject end;
+        end.trackName = program->track;
+        end.endsTrack = true;
+        shared->push(index, {end}, nullptr, std::nullopt, false);
+        const bool running = m_running.load(std::memory_order_acquire);
+        if (!readError.isEmpty() && running) {
+            emit programEnded(program->config.programNumber, readError);
+        }
+        // Only a clean end of the source: not an error, and not an
+        // interrupt, which closes the SRT pipe after it clears m_running.
+        shared->workerEnded(readError.isEmpty() && running);
+    };
     for (int index = 0; index < static_cast<int>(programs.size()); ++index) {
-        workers.emplace_back([this, shared, program = programs[index].get(), index, fragmentUs] {
-            QString readError;
-            while (true) {
-                M2tsObject object;
-                if (!program->packetizer->readObject(program->packetsPerObject, &object, &readError)) {
-                    break;
-                }
-                PublishedObject published;
-                published.trackName = program->track;
-                published.payload = std::move(object.payload);
-                published.groupId = object.groupId;
-                published.objectId = object.objectId;
-                published.startsGroup = object.startsGroup;
-                published.mediaTimeUs = static_cast<std::uint64_t>(program->objects) * fragmentUs;
-                published.mediaDurationUs = fragmentUs;
-                ++program->objects;
-                // Draft "Use of MSF Initialization Data": the new initData
-                // reaches the catalog before the Objects that rely on the
-                // changed PSI, this one first.
-                QByteArray initData;
-                const bool initDataChanged = program->packetizer->takeInitDataChange(&initData);
-                const Shared::Pushed pushed =
-                    shared->push(index, {published}, initDataChanged ? &initData : nullptr, object.sourceOffset, true);
-                if (pushed == Shared::Pushed::Stopped) {
-                    break;
-                }
-                if (pushed == Shared::Pushed::Dropped) {
+        Program* program = programs[index].get();
+        if (programOpened[index]) {
+            workers.emplace_back([runProgram, program, index] { runProgram(program, index); });
+            continue;
+        }
+        // A late program: open again until it opens, its source ends, or the
+        // pipeline stops. Its catalog entry goes out before its first Object.
+        workers.emplace_back([this, shared, program, index, runProgram, newPacketizer, openFailure, catalogEntry,
+                              lastFailure = notOpened[index]]() mutable {
+            while (m_running.load(std::memory_order_acquire) && !program->device->ended()) {
+                // The offsets in the queue's stream go on from the last
+                // attempt: the first pull's live edge is in that scale.
+                auto next = newPacketizer(program);
+                next->continueFrom(*program->packetizer);
+                program->packetizer = next;
+                QString error;
+                if (!program->packetizer->open(program->config.programNumber, &error)) {
+                    // An attempt that the end of the source cut short says less.
+                    if (!program->device->ended()) {
+                        lastFailure = openFailure(*program, error);
+                    }
                     continue;
                 }
-                // The timeline history records the Groups that went out: none
-                // from before the first pull.
-                if (pushed == Shared::Pushed::QueuedFirstLive) {
-                    program->timeline = TimelineHistory();
+                if (shared->join(index, catalogEntry(program, QDateTime::currentMSecsSinceEpoch()))) {
+                    emit status(QStringLiteral("program %1 joined the catalog.").arg(program->config.programNumber));
+                    runProgram(program, index);
+                    return;
                 }
-                // One timeline record per media Group, for its first Object
-                // that starts a video PES, with that PES's PTS (MSF 7.1.1). It
-                // follows the media Object it records, and goes with it when
-                // the first pull comes in between and drops it.
-                if (!program->timelineTrack.isEmpty() && object.ptsUs.has_value() &&
-                    program->timeline.lastGroupId != published.groupId &&
-                    shared->push(index, {timelineObject(&program->timeline, program->timelineTrack, published,
-                                                        *object.ptsUs, nowUnixUs(), nowSteadyUs(),
-                                                        m_relay.accessibleWindowMs)},
-                                 nullptr, object.sourceOffset, false) == Shared::Pushed::Stopped) {
-                    break;
+                break;
+            }
+            // It never opened. At the end of its source, programEnded() says
+            // why, once, as for a track that ends on an error; the others'
+            // broadcast still ends cleanly. An interrupt says nothing.
+            const bool ended = program->device->ended() && m_running.load(std::memory_order_acquire);
+            if (ended) {
+                if (!lastFailure.endsWith(QLatin1Char('.'))) {
+                    lastFailure += QLatin1Char('.');
                 }
+                emit programEnded(program->config.programNumber,
+                                  lastFailure + QStringLiteral(" It never joined the catalog."));
             }
-            // The track has no more Objects: its last one closes its Group
-            // now, rather than when the session ends. Timeline Objects are
-            // each final in their Group, so that track needs no marker. The
-            // marker is queued before programEnded() reports why the track ended.
-            PublishedObject end;
-            end.trackName = program->track;
-            end.endsTrack = true;
-            shared->push(index, {end}, nullptr, std::nullopt, false);
-            const bool running = m_running.load(std::memory_order_acquire);
-            if (!readError.isEmpty() && running) {
-                emit programEnded(program->config.programNumber, readError);
-            }
-            // Only a clean end of the source: not an error, and not an
-            // interrupt, which closes the SRT pipe after it clears m_running.
-            shared->workerEnded(readError.isEmpty() && running);
+            shared->workerEnded(ended);
         });
     }
     emit status(QStringLiteral("MSFTS multi-program pipeline started: %1 programs.").arg(programs.size()));

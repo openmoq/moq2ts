@@ -300,6 +300,7 @@ struct Run {
     bool finished = false;   // the pipeline stopped on its own within kWait
     QStringList errors;
     QStringList ended;   // "<program>: <reason>" for each program that ended early
+    QStringList statuses;
     QStringList log;
     QByteArray catalog;
     std::vector<ReadyObject> sent;   // what the publisher sent, in order
@@ -358,6 +359,10 @@ Run publish(const QString& source, const QList<MptsProgramConfig>& programs, con
         if (onError) {
             onError(message);
         }
+    }, Qt::DirectConnection);
+    QObject::connect(&pipeline, &MptsPipeline::status, &pipeline, [&](const QString& message) {
+        std::lock_guard<std::mutex> lock(errorMutex);
+        run.statuses.append(message);
     }, Qt::DirectConnection);
     // onError hears why a program ended too.
     QObject::connect(&pipeline, &MptsPipeline::programEnded, &pipeline, [&](int number, const QString& reason) {
@@ -634,16 +639,18 @@ int main() {
                      "low mux rate: one warning, for program 102: " + joined(below));
     }
 
-    // Program 103 missing from the PAT: programs 101 and 102 publish, and
-    // programEnded reports 103 once, before anything is published.
+    // Program 103 missing from the PAT: programs 101 and 102 publish, and a
+    // status says that 103 joins the catalog when it opens. It never does.
     {
         const Run run = publish(dir.filePath("missing.fifo"), {program(101), program(102), program(103)},
                                 QByteArray(), liveFeed(mptsStream({101, 102}, 60), roundsBytes(2, 15)));
         ok &= expect(run.finished, "missing program: the pipeline ends with the source");
         ok &= expect(run.errors.isEmpty(), "missing program: no pipeline error: " + joined(run.errors));
-        ok &= expect(run.ended == QStringList({"103: program 103 is not in the source PAT. The other programs "
-                                               "publish without it."}),
-                     "missing program: programEnded names 103 once: " + joined(run.ended));
+        ok &= expect(run.ended == QStringList({"103: program 103 is not in the source PAT. It never joined the catalog."}),
+                     "missing program: programEnded names 103 once, at the end: " + joined(run.ended));
+        ok &= expect(run.statuses.filter(QStringLiteral("program 103")) ==
+                         QStringList({"program 103 is not in the source PAT. It joins the catalog when it opens."}),
+                     "missing program: one status names 103: " + joined(run.statuses));
         const QStringList tracks = publishedTracks(run.log);
         ok &= expect(tracks.count(QStringLiteral("program-101")) > 0 && tracks.count(QStringLiteral("program-102")) > 0 &&
                          !tracks.contains(QStringLiteral("program-103")),
@@ -675,7 +682,7 @@ int main() {
     }
 
     // The PAT lists program 102, but its PMT never comes, as when its encoder
-    // is down: 101 publishes, and programEnded says that 102's PMT is missing.
+    // is down: 101 publishes, and a status says that 102's PMT is missing.
     {
         const QByteArray data = withoutPids(mptsStream({101, 102}, 60), {0x1001, 0x101});
         const Run run = publish(dir.filePath("no-pmt.fifo"), {program(101), program(102)}, QByteArray(),
@@ -683,12 +690,64 @@ int main() {
         ok &= expect(run.finished, "missing PMT: the pipeline ends with the source");
         ok &= expect(run.errors.isEmpty(), "missing PMT: no pipeline error: " + joined(run.errors));
         ok &= expect(run.ended == QStringList({"102: program 102: The PAT lists program 102, but its PMT (PID 4097) "
-                                               "did not come within 1000 ms of PCR time after the PAT. The other "
-                                               "programs publish without it."}),
-                     "missing PMT: programEnded names 102 and its PMT: " + joined(run.ended));
+                                               "did not come within 1000 ms of PCR time after the PAT. It never "
+                                               "joined the catalog."}),
+                     "missing PMT: programEnded names 102 once, at the end: " + joined(run.ended));
+        ok &= expect(run.statuses.filter(QStringLiteral("program 102")) ==
+                         QStringList({"program 102: The PAT lists program 102, but its PMT (PID 4097) did not come "
+                                      "within 1000 ms of PCR time after the PAT. It joins the catalog when it opens."}),
+                     "missing PMT: one status names 102 and its PMT: " + joined(run.statuses));
         const QStringList tracks = publishedTracks(run.log);
         ok &= expect(tracks.count(QStringLiteral("program-101")) > 0 && !tracks.contains(QStringLiteral("program-102")),
                      "missing PMT: 101 publishes, 102 does not");
+        // The source ended cleanly, with 102 still waiting: the broadcast ends.
+        ok &= expect(tracks.count(QStringLiteral("catalog")) == 1, "missing PMT: one closing catalog");
+    }
+
+    // Program 102's PMT and media start at round 20, as when its encoder comes
+    // up late: 101 publishes from the start, and 102 joins with a catalog
+    // update that lists it, before its first Object.
+    {
+        const QByteArray full = mptsStream({101, 102}, 60);
+        const QByteArray data = withoutPids(full.left(roundsBytes(2, 20)), {0x1001, 0x101}) +
+                                full.mid(roundsBytes(2, 20));
+        const qsizetype lead = withoutPids(full.left(roundsBytes(2, 15)), {0x1001, 0x101}).size();
+        const Run run = publish(dir.filePath("late-pmt.fifo"), {program(101), program(102)}, QByteArray(),
+                                pacedFeed(data, lead, roundsBytes(2, 1), std::chrono::milliseconds(20)));
+        ok &= expect(run.finished, "late PMT: the pipeline ends with the source");
+        ok &= expect(run.errors.isEmpty() && run.ended.isEmpty(),
+                     "late PMT: no error, no programEnded: " + joined(run.errors) + joined(run.ended));
+        ok &= expect(run.statuses.contains(QStringLiteral("program 102 joined the catalog.")),
+                     "late PMT: a status says that 102 joined: " + joined(run.statuses));
+        ok &= expect(catalogTracks(run.catalog) == QStringList({"program-101", "program-101.timeline", "program-102",
+                                                                "program-102.timeline"}),
+                     "late PMT: the last catalog lists both programs: " + run.catalog.toStdString());
+        const QStringList tracks = publishedTracks(run.log);
+        const qsizetype update = tracks.indexOf(QStringLiteral("catalog"));
+        const qsizetype first102 = tracks.indexOf(QStringLiteral("program-102"));
+        ok &= expect(tracks.count(QStringLiteral("program-101")) > 0 && tracks.indexOf(QStringLiteral("program-101")) < update,
+                     "late PMT: 101 publishes before the update");
+        ok &= expect(update >= 0 && first102 > update, "late PMT: 102's first Object follows the catalog update");
+        // 102 opens on the PMT at round 20, after which open() measures its
+        // rates over 1 s of PCR time (10 rounds), so its first Object is from
+        // round 31 or so; one more open attempt would put it after round 40.
+        int firstRound102 = -1;
+        for (const ReadyObject& ready : run.sent) {
+            if (ready.object.trackName != QLatin1String("program-102")) {
+                continue;
+            }
+            for (const QByteArray& packet : packetsOf(ready.object.payload)) {
+                if (pidOf(packet) == 0x101 && roundOf(packet) >= 0) {
+                    firstRound102 = roundOf(packet);
+                    break;
+                }
+            }
+            break;
+        }
+        ok &= expect(firstRound102 >= 20 && firstRound102 <= 32,
+                     "late PMT: 102's first Object is from round 20-32, not " + std::to_string(firstRound102));
+        // the update, then the closing catalog
+        ok &= expect(tracks.count(QStringLiteral("catalog")) == 2, "late PMT: one update and one closing catalog");
     }
 
     // Program 101's PMT changes: one new catalog Object, and program 102 keeps
