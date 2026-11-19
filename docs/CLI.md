@@ -331,10 +331,16 @@ macOS only; a Windows build rejects it.
 | `segment_bytes` | `65536` | As `--segment-bytes`, from 1 to 1048576 (1 MiB) |
 | `timeline` | `true` | `false` publishes no media timeline track, as `--no-timeline` |
 | `accessible_window_ms` | `300000` | As `--accessible-window`, in milliseconds, from 0 to 2000000000 |
+| `strict_start` | `false` | `true` stops every program when one does not open at start-up |
 
 `ingest` holds exactly one of `srt` or `path`. An unknown key is refused. An
 invalid file exits with code 2, and the error names the field and the value. A
 program that ends, or whose read fails, ends its own track; the others go on.
+A program that does not open at start-up, because the PAT does not list it or
+its PMT does not come within 1 s of PCR time, is logged as an error and left
+out of the catalog; the others publish, and the exit code is 1. With
+`strict_start`, it stops every program instead. Only when no program opens does
+the start fail.
 
 The tracks start at the live edge. While the relay has no subscriber, moq2ts
 keeps reading the source and drops its oldest packets. When the first

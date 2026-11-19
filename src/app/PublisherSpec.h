@@ -30,6 +30,8 @@ struct PublisherSpec {
     QString sourcePath;
     QList<MptsProgramConfig> programs;
     int segmentBytes = 64 * 1024;
+    // MptsConfig::strictStart.
+    bool strictStart = false;
 };
 
 // Reads a publisher configuration:
@@ -40,7 +42,7 @@ struct PublisherSpec {
 //     "programs": [ { "number": 101, "mux_rate_bps": 6000000, "si": ["sdt", "eit-pf", "tdt-tot"] },
 //                   { "number": 102 } ],
 //     "segment_bytes": 65536,
-//     "timeline": true, "accessible_window_ms": 300000
+//     "timeline": true, "accessible_window_ms": 300000, "strict_start": false
 //   }
 // "ingest" holds exactly one of "srt" or "path" (a FIFO). An unknown key
 // fails. On failure, error names the field and the value, and out is left

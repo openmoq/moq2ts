@@ -290,7 +290,8 @@ bool parsePublisherSpec(const QByteArray& json, PublisherSpec* out, QString* err
     const QJsonObject root = document.object();
     if (!checkKeys(root, QString(),
                    {QStringLiteral("relay"), QStringLiteral("ingest"), QStringLiteral("programs"),
-                    QStringLiteral("segment_bytes"), QStringLiteral("timeline"), QStringLiteral("accessible_window_ms")},
+                    QStringLiteral("segment_bytes"), QStringLiteral("timeline"), QStringLiteral("accessible_window_ms"),
+                    QStringLiteral("strict_start")},
                    error)) {
         return false;
     }
@@ -314,6 +315,13 @@ bool parsePublisherSpec(const QByteArray& json, PublisherSpec* out, QString* err
             return fail(error, QStringLiteral("timeline: %1 is not true or false.").arg(jsonText(timeline)));
         }
         spec.relay.timelineTrack = timeline.toBool();
+    }
+    const QJsonValue strictStart = root.value(QStringLiteral("strict_start"));
+    if (!strictStart.isUndefined()) {
+        if (!strictStart.isBool()) {
+            return fail(error, QStringLiteral("strict_start: %1 is not true or false.").arg(jsonText(strictStart)));
+        }
+        spec.strictStart = strictStart.toBool();
     }
     if (out != nullptr) {
         *out = spec;

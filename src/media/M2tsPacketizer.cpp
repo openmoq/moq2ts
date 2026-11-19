@@ -754,9 +754,11 @@ bool M2tsPacketizer::scanPsi(QString* error) {
         }
         return index < kLivePsiMaxPackets && span.elapsed() < limit;
     };
+    bool sourceEnded = false;
     for (int index = 0; inWindow(index) && !psiComplete(); ++index) {
         const QByteArray sourcePacket = readSourcePacket();
         if (sourcePacket.size() != m_packetSize) {
+            sourceEnded = true;
             break;
         }
         // On non-seekable input we cannot rewind after the scan, so retain every
@@ -790,6 +792,13 @@ bool M2tsPacketizer::scanPsi(QString* error) {
 
     if (m_pmtPid < 0 && m_requestedProgramNumber != 0 && !m_patPrograms.empty()) {
         return fail(QStringLiteral("Requested program %1 was not found in PAT.").arg(m_requestedProgramNumber));
+    }
+    if (m_pmt.bytes.isEmpty() && m_pmtPid >= 0 && patAt >= 0 && !sourceEnded) {
+        return fail(QStringLiteral("The PAT lists program %1, but its PMT (PID %2) did not come within %3 ms of PCR "
+                                   "time after the PAT.")
+                        .arg(m_requestedProgramNumber)
+                        .arg(m_pmtPid)
+                        .arg(kPsiWindowPcr * 1000 / kPcrHz));
     }
     if (m_pmt.bytes.isEmpty()) {
         return fail(QStringLiteral("Failed to collect PAT/PMT packets for catalog initData."));

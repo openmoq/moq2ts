@@ -160,6 +160,22 @@ int main() {
                   {QStringLiteral("accessible_window_ms: -1 is not an integer from 0 to 2000000000.")},
                   "a negative accessible window");
 
+    // strict_start: off by default, so a program that does not open leaves the
+    // others publishing; true stops every program, as before.
+    {
+        PublisherSpec spec;
+        QString error;
+        ok &= expect(parsePublisherSpec(kExample, &spec, &error) && !spec.strictStart,
+                     "strict_start defaults to off: " + error.toStdString());
+        ok &= expect(parsePublisherSpec(exampleWith(R"("segment_bytes": 65536)",
+                                                    R"("segment_bytes": 65536, "strict_start": true)"),
+                                        &spec, &error) &&
+                         spec.strictStart,
+                     "strict_start parses: " + error.toStdString());
+    }
+    ok &= rejects(exampleWith(R"("segment_bytes": 65536)", R"("segment_bytes": 65536, "strict_start": 1)"),
+                  {QStringLiteral("strict_start: 1 is not true or false.")}, "a strict_start that is not a boolean");
+
     // The relay authorization token, opaque to moq2ts: a value or a file, of
     // the token type that the relay expects (16 by default, as moqx).
     {

@@ -314,6 +314,7 @@ using Feed = std::function<void(int fd, const MptsPipeline& pipeline, const std:
 
 struct Options {
     std::shared_ptr<moq2ts::SourceGapLog> sourceGaps;
+    bool strictStart = false;
     std::function<void(PublishConfig& relay)> relay;
     std::function<void(const std::atomic<bool>& running)> beforeFirstPull;
 };
@@ -338,6 +339,7 @@ Run publish(const QString& source, const QList<MptsProgramConfig>& programs, con
     config.programs = programs;
     config.targetSegmentBytes = 4 * 188;
     config.sourceGaps = options.sourceGaps;
+    config.strictStart = options.strictStart;
 
     Run run;
     std::mutex errorMutex;
@@ -494,6 +496,18 @@ int pidOf(const QByteArray& packet) {
 }
 
 // The flags octet of the adaptation field, or 0 without one.
+// data without the packets of these PIDs.
+QByteArray withoutPids(const QByteArray& data, const QList<int>& pids) {
+    QByteArray out;
+    for (qsizetype offset = 0; offset + 188 <= data.size(); offset += 188) {
+        const QByteArray packet = data.mid(offset, 188);
+        if (!pids.contains(pidOf(packet))) {
+            out += packet;
+        }
+    }
+    return out;
+}
+
 int adaptationFlags(const QByteArray& packet) {
     const bool adaptation = ((static_cast<unsigned char>(packet[3]) >> 4) & 0x03) >= 2;
     return adaptation && static_cast<unsigned char>(packet[4]) >= 1 ? static_cast<unsigned char>(packet[5]) : 0;
@@ -620,14 +634,61 @@ int main() {
                      "low mux rate: one warning, for program 102: " + joined(below));
     }
 
-    // Program 103 missing from the PAT: start fails with an error naming 103.
+    // Program 103 missing from the PAT: programs 101 and 102 publish, and
+    // programEnded reports 103 once, before anything is published.
     {
         const Run run = publish(dir.filePath("missing.fifo"), {program(101), program(102), program(103)},
-                                mptsStream({101, 102}, 60));
-        ok &= expect(run.finished, "missing program: the pipeline stops");
+                                QByteArray(), liveFeed(mptsStream({101, 102}, 60), roundsBytes(2, 15)));
+        ok &= expect(run.finished, "missing program: the pipeline ends with the source");
+        ok &= expect(run.errors.isEmpty(), "missing program: no pipeline error: " + joined(run.errors));
+        ok &= expect(run.ended == QStringList({"103: program 103 is not in the source PAT. The other programs "
+                                               "publish without it."}),
+                     "missing program: programEnded names 103 once: " + joined(run.ended));
+        const QStringList tracks = publishedTracks(run.log);
+        ok &= expect(tracks.count(QStringLiteral("program-101")) > 0 && tracks.count(QStringLiteral("program-102")) > 0 &&
+                         !tracks.contains(QStringLiteral("program-103")),
+                     "missing program: 101 and 102 publish, 103 does not");
+        ok &= expect(catalogTracks(run.catalog) == QStringList({"program-101", "program-101.timeline", "program-102",
+                                                                "program-102.timeline"}),
+                     "missing program: the catalog lists 101 and 102 only: " + run.catalog.toStdString());
+    }
+
+    // The same with strict_start: start fails with an error naming 103, and
+    // nothing is published, as before.
+    {
+        const Run run = publish(dir.filePath("missing-strict.fifo"), {program(101), program(102), program(103)},
+                                mptsStream({101, 102}, 60), {}, {}, Options{.strictStart = true});
+        ok &= expect(run.finished, "strict start: the pipeline stops");
         ok &= expect(run.errors.contains(QStringLiteral("program 103 is not in the source PAT")),
-                     "missing program: the error names 103: " + joined(run.errors));
-        ok &= expect(publishedTracks(run.log).isEmpty(), "missing program: nothing is published");
+                     "strict start: the error names 103: " + joined(run.errors));
+        ok &= expect(publishedTracks(run.log).isEmpty(), "strict start: nothing is published");
+    }
+
+    // No program opens: start fails, as before.
+    {
+        const Run run = publish(dir.filePath("none.fifo"), {program(103), program(104)}, mptsStream({101, 102}, 60));
+        ok &= expect(run.finished, "no program opens: the pipeline stops");
+        ok &= expect(run.errors.contains(QStringLiteral("program 103 is not in the source PAT")),
+                     "no program opens: the error names the first program: " + joined(run.errors));
+        ok &= expect(run.ended.isEmpty(), "no program opens: no programEnded: " + joined(run.ended));
+        ok &= expect(publishedTracks(run.log).isEmpty(), "no program opens: nothing is published");
+    }
+
+    // The PAT lists program 102, but its PMT never comes, as when its encoder
+    // is down: 101 publishes, and programEnded says that 102's PMT is missing.
+    {
+        const QByteArray data = withoutPids(mptsStream({101, 102}, 60), {0x1001, 0x101});
+        const Run run = publish(dir.filePath("no-pmt.fifo"), {program(101), program(102)}, QByteArray(),
+                                liveFeed(data, roundsBytes(1, 15)));
+        ok &= expect(run.finished, "missing PMT: the pipeline ends with the source");
+        ok &= expect(run.errors.isEmpty(), "missing PMT: no pipeline error: " + joined(run.errors));
+        ok &= expect(run.ended == QStringList({"102: program 102: The PAT lists program 102, but its PMT (PID 4097) "
+                                               "did not come within 1000 ms of PCR time after the PAT. The other "
+                                               "programs publish without it."}),
+                     "missing PMT: programEnded names 102 and its PMT: " + joined(run.ended));
+        const QStringList tracks = publishedTracks(run.log);
+        ok &= expect(tracks.count(QStringLiteral("program-101")) > 0 && !tracks.contains(QStringLiteral("program-102")),
+                     "missing PMT: 101 publishes, 102 does not");
     }
 
     // Program 101's PMT changes: one new catalog Object, and program 102 keeps
