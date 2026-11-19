@@ -71,6 +71,21 @@ int main() {
         check(totals.finalFields() == "pulled_objects=12 pulled_bytes=34 sent_objects=5 sent_bytes=6",
               "pulled and sent are reported apart: " + totals.finalFields().toStdString());
 
+        // The periodic line shows the latest reading of what moqxr sent, and a
+        // run that ends without a final count reports the last reading.
+        moq2ts::PublishTotals live;
+        check(live.sentFields() == "sent_objects=unknown sent_bytes=unknown", "no reading yet is unknown");
+        live.observeSent(7, 700);
+        check(live.sentFields() == "sent_objects=7 sent_bytes=700", "a reading shows: " + live.sentFields().toStdString());
+        live.observeSent(3, 300);
+        check(live.sentFields() == "sent_objects=7 sent_bytes=700", "a lower reading is ignored");
+        live.observeSent(9, 900);
+        check(live.finalFields() == "pulled_objects=0 pulled_bytes=0 sent_objects=9 sent_bytes=900",
+              "without a final count, [final] gives the last reading: " + live.finalFields().toStdString());
+        live.recordSent(10, 1000);
+        check(live.finalFields() == "pulled_objects=0 pulled_bytes=0 sent_objects=10 sent_bytes=1000",
+              "a final count takes the place of the readings");
+
         // The mock publisher sends what it pulls: the catalog and three Objects.
         moq2ts::PublishTotals mock;
         moq2ts::PublishConfig cfg;

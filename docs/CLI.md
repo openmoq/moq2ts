@@ -95,10 +95,17 @@ it runs. A file source waits 120 s for its first subscriber. When the session
 ends while a live source still runs, without a stop or the end of the source,
 moq2ts logs a warning that says so and exits with code 1.
 
+About once per second, a live source prints a `[stats]` line on stdout with the
+media totals `objects`, `bytes`, and `groups`, and `sent_objects` and
+`sent_bytes`, which count what moqxr has sent so far over all the connections of
+the run (`unknown` before the first reading). The `[final]` fields below use the
+same counts.
+
 At exit, moq2ts prints a `[final]` line on stdout. `pulled_objects` and
 `pulled_bytes` count the Objects handed to moqxr, catalog and timeline Objects
 included; `sent_objects` and `sent_bytes` count what moqxr sent, which is less
-while nobody subscribes, and are `unknown` after a failed publish. The
+while nobody subscribes. After a failed publish they are the last reading taken
+while it ran, or `unknown` when there was none. The
 single-source path also prints the media totals `objects`, `bytes`, and
 `groups` first.
 

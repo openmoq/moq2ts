@@ -69,16 +69,33 @@ public:
         m_sentObjects.store(objects, std::memory_order_relaxed);
         m_sentBytes.store(bytes, std::memory_order_relaxed);
     }
+    // A reading of what moqxr has sent so far, while the publish runs. The
+    // counts only grow, so a reading that is lower than an earlier one (the
+    // publisher of a session just ended, not yet added to the totals) is
+    // ignored.
+    void observeSent(std::int64_t objects, std::int64_t bytes) {
+        raise(m_observedObjects, objects);
+        raise(m_observedBytes, bytes);
+    }
+    // "sent_objects=N sent_bytes=B" for the periodic line: the latest reading,
+    // "unknown" before the first one.
+    QString sentFields() const {
+        return QStringLiteral("sent_objects=%1 sent_bytes=%2")
+            .arg(countText(m_observedObjects.load(std::memory_order_relaxed)),
+                 countText(m_observedBytes.load(std::memory_order_relaxed)));
+    }
     // "pulled_objects=N pulled_bytes=B sent_objects=N sent_bytes=B", with
-    // "unknown" for a sent count moqxr did not give.
+    // "unknown" for a sent count moqxr did not give. After a publish that ended
+    // without one, the last reading taken while it ran stands in.
     QString finalFields() const {
-        const auto sent = [](std::int64_t value) {
-            return value < 0 ? QStringLiteral("unknown") : QString::number(value);
+        const auto sent = [](const std::atomic<std::int64_t>& final, const std::atomic<std::int64_t>& observed) {
+            const std::int64_t value = final.load(std::memory_order_relaxed);
+            return countText(value >= 0 ? value : observed.load(std::memory_order_relaxed));
         };
         return QStringLiteral("pulled_objects=%1 pulled_bytes=%2 sent_objects=%3 sent_bytes=%4")
             .arg(m_pulledObjects.load(std::memory_order_relaxed))
             .arg(m_pulledBytes.load(std::memory_order_relaxed))
-            .arg(sent(m_sentObjects.load(std::memory_order_relaxed)), sent(m_sentBytes.load(std::memory_order_relaxed)));
+            .arg(sent(m_sentObjects, m_observedObjects), sent(m_sentBytes, m_observedBytes));
     }
 
 private:
@@ -86,6 +103,17 @@ private:
     std::atomic<std::int64_t> m_pulledBytes{0};
     std::atomic<std::int64_t> m_sentObjects{-1};
     std::atomic<std::int64_t> m_sentBytes{-1};
+    std::atomic<std::int64_t> m_observedObjects{-1};
+    std::atomic<std::int64_t> m_observedBytes{-1};
+
+    static QString countText(std::int64_t value) {
+        return value < 0 ? QStringLiteral("unknown") : QString::number(value);
+    }
+    static void raise(std::atomic<std::int64_t>& target, std::int64_t value) {
+        std::int64_t current = target.load(std::memory_order_relaxed);
+        while (value > current && !target.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
+        }
+    }
 };
 
 class IMoqOutput {
@@ -116,6 +144,9 @@ public:
                             std::function<std::optional<PublishedObject>()> nextObject,
                             std::atomic<bool>& running) override;
     void stop() override;
+    // What moqxr has sent so far over all the connections of this run, read
+    // while the publish runs. False before any connection exists. Thread-safe.
+    bool sentSoFar(int64_t& objects, int64_t& bytes) const;
     bool connected() const override;
 
     // The MOQT drafts that --draft accepts with the pinned moqxr SDK.
@@ -180,6 +211,9 @@ private:
     // the retry rule of a process whose connection has worked. Only the
     // publish thread touches it, one publish at a time.
     ReconnectPolicy m_reconnectPolicy;
+    // What the connections that ended sent, summed. Guarded by m_mutex.
+    int64_t m_sentEndedObjects = 0;
+    int64_t m_sentEndedBytes = 0;
 #ifdef MOQ2TS_HAS_MOQXR
     std::shared_ptr<openmoq::publisher::Publisher> m_activePublisher;
 #endif

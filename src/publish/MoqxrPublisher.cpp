@@ -470,10 +470,21 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
             }
 
             const auto stats = activePublisher->stats();
-            // moqxr copies its session counts into stats() only when the publish
-            // succeeds; after a failure they are not what it sent.
+            // This connection's count joins those of the ones before it, so that
+            // a reconnection does not start the totals again at 0.
+            int64_t sentObjects = 0;
+            int64_t sentBytes = 0;
+            {
+                QMutexLocker locker(&m_mutex);
+                m_sentEndedObjects += static_cast<int64_t>(stats.objects_published);
+                m_sentEndedBytes += static_cast<int64_t>(stats.bytes_published);
+                sentObjects = m_sentEndedObjects;
+                sentBytes = m_sentEndedBytes;
+            }
+            // Earlier moqxr releases copy their session counts into stats() only
+            // when the publish succeeds; after a failure they are not what it sent.
             if (status.ok) {
-                emit sentTotals(static_cast<int64_t>(stats.objects_published), static_cast<int64_t>(stats.bytes_published));
+                emit sentTotals(sentObjects, sentBytes);
             }
             const QString unexpectedEnd = unexpectedEndReason(cfg.liveSource, stillRunning, publisherStopped, sourceEnded);
             if (!unexpectedEnd.isEmpty()) {
@@ -552,6 +563,32 @@ bool MoqxrPublisher::publishLiveObjectsMock(const QByteArray& catalog,
     return true;
 }
 
+
+bool MoqxrPublisher::sentSoFar(int64_t& objects, int64_t& bytes) const {
+#ifdef MOQ2TS_HAS_MOQXR
+    std::shared_ptr<openmoq::publisher::Publisher> publisher;
+    int64_t endedObjects = 0;
+    int64_t endedBytes = 0;
+    {
+        QMutexLocker locker(&m_mutex);
+        publisher = m_activePublisher;
+        endedObjects = m_sentEndedObjects;
+        endedBytes = m_sentEndedBytes;
+    }
+    objects = endedObjects;
+    bytes = endedBytes;
+    if (publisher) {
+        const auto stats = publisher->stats();
+        objects += static_cast<int64_t>(stats.objects_published);
+        bytes += static_cast<int64_t>(stats.bytes_published);
+    }
+    return true;
+#else
+    Q_UNUSED(objects);
+    Q_UNUSED(bytes);
+    return false;
+#endif
+}
 
 void MoqxrPublisher::stop() {
 #ifdef MOQ2TS_HAS_MOQXR
