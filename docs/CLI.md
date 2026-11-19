@@ -487,6 +487,7 @@ no longer produced.
   automatically and advertised as `isLive: true`; VOD duration probing is skipped
   (it would otherwise open and consume the pipe a second time).
 - **Per-program mode over a pipe** works too: the PAT/PMT init scan is buffered and
-  replayed so no leading packets are lost. If the source never emits PAT/PMT within
-  the first ~4096 packets, per-program init fails with a clear error - use
-  `--unmodified` for such feeds.
+  replayed so no leading packets are lost. The scan waits for the PAT up to 1 s of
+  PCR time, then for its PMT up to 1 s after the PAT. A source without a PCR is
+  read up to 106,400 packets, about 20 MB (160 s at 1 Mbit/s). If the tables do not arrive,
+  per-program init fails with a clear error - use `--unmodified` for such feeds.

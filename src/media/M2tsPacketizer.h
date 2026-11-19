@@ -233,8 +233,9 @@ public:
 
 private:
     bool detectPacketSize(QString* error);
-    // Reads up to 4096 packets (or 1 s of PCR time, see setTimedStartWindows)
-    // for the PAT and the selected program's PMT.
+    // Reads the PAT and the selected program's PMT: up to 4096 packets of a
+    // file; on a live source, up to 1 s of PCR time for the PAT, then 1 s
+    // after it for the PMT.
     bool scanPsi(QString* error);
     void handlePsiPacket(const QByteArray& tsPacket, const QByteArray& sourcePacket);
     void onPat(const PsiAssembler::Section& section);
