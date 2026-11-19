@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -53,6 +54,35 @@ QByteArray liveStream() {
     return ts;
 }
 
+// An adaptation-only packet on PID 0x100 (the PCR PID) with a PCR of base
+// ticks of 90 kHz.
+QByteArray pcrPacket(std::uint64_t base, int continuityCounter) {
+    QByteArray packet;
+    packet.append(char(0x47));
+    packet.append(char(0x01));
+    packet.append(char(0x00));
+    packet.append(static_cast<char>(0x20 | (continuityCounter & 0x0F)));
+    packet.append(char(183));    // adaptation_field_length
+    packet.append(char(0x10));   // PCR_flag
+    packet.append(static_cast<char>(base >> 25));
+    packet.append(static_cast<char>(base >> 17));
+    packet.append(static_cast<char>(base >> 9));
+    packet.append(static_cast<char>(base >> 1));
+    packet.append(static_cast<char>(((base & 1) << 7) | 0x7E));
+    packet.append(char(0x00));
+    packet.append(QByteArray(188 - packet.size(), char(0xFF)));
+    return packet;
+}
+
+// liveStream(), then 1.1 s of PCRs.
+QByteArray liveStreamWithPcr() {
+    QByteArray ts = liveStream();
+    for (int n = 0; n <= 11; ++n) {
+        ts += pcrPacket(9000 * static_cast<std::uint64_t>(n), 6);
+    }
+    return ts;
+}
+
 QList<QByteArray> publishObjects(M2tsPacketizer& packetizer, QString* error) {
     QList<QByteArray> payloads;
     M2tsObject object;
@@ -60,6 +90,38 @@ QList<QByteArray> publishObjects(M2tsPacketizer& packetizer, QString* error) {
         payloads.append(object.payload);
     }
     return payloads;
+}
+
+// The source stays open and quiet after its packets: readObject must return
+// the partial Object after about 50 ms. endSource is the guard, which ends a
+// read that is still waiting after 2 s.
+bool returnsPartialObject(M2tsPacketizer& packetizer, const std::function<void()>& endSource, const std::string& name) {
+    using Clock = std::chrono::steady_clock;
+    M2tsObject object;
+    QString error;
+    bool read = false;
+    std::atomic<bool> done{false};
+    const Clock::time_point start = Clock::now();
+    Clock::time_point end;
+    std::thread reader([&] {
+        read = packetizer.readObject(348, &object, &error);
+        end = Clock::now();
+        done = true;
+    });
+    while (!done && Clock::now() - start < std::chrono::seconds(2)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    const bool inTime = done;
+    endSource();
+    reader.join();
+    bool ok = expect(inTime, name + ": the read returns while the source is quiet");
+    if (inTime) {
+        const auto held = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        ok &= expect(read && !object.payload.isEmpty() && object.payload.size() < 348 * kPacket,
+                     name + ": a partial Object: " + error.toStdString());
+        ok &= expect(held >= 50, name + ": held " + std::to_string(held) + " ms, at least 50");
+    }
+    return ok;
 }
 }  // namespace
 
@@ -175,6 +237,39 @@ int main() {
         const QList<QByteArray> got = publishObjects(fromQueue, &queueError);
         producer.join();
         ok &= expect(!expected.isEmpty() && got == expected, "same Objects from the queue as from the FIFO");
+    }
+
+    // A live source that goes quiet does not hold the packets already read:
+    // the partial Object goes out, on a FIFO and on a queue. The PCRs end the
+    // 1 s window of open(), which then needs no more packets.
+    {
+        QTemporaryDir dir;
+        const QString fifo = dir.filePath("quiet.fifo");
+        ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
+        std::atomic<bool> closeWriter{false};
+        std::thread writer([&] {
+            QFile file(fifo);
+            if (file.open(QIODevice::WriteOnly | QIODevice::Unbuffered)) {
+                file.write(liveStreamWithPcr());
+                while (!closeWriter) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+            }
+        });
+        QString error;
+        M2tsPacketizer fromFifo(fifo);
+        ok &= expect(fromFifo.open(1, &error), "quiet FIFO opens: " + error.toStdString());
+        ok &= returnsPartialObject(fromFifo, [&] { closeWriter = true; }, "quiet FIFO");
+        closeWriter = true;
+        writer.join();
+    }
+    {
+        auto device = std::make_shared<PacketQueueDevice>(100 * kPacket, std::make_shared<SourceGapLog>());
+        device->push(liveStreamWithPcr());
+        QString error;
+        M2tsPacketizer fromQueue(device, QStringLiteral("program 1"));
+        ok &= expect(fromQueue.open(1, &error), "quiet queue opens: " + error.toStdString());
+        ok &= returnsPartialObject(fromQueue, [&] { device->finish(); }, "quiet queue");
     }
 
     // A gap marked at the next byte pushed stays at that byte when an overflow

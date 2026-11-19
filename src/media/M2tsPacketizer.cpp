@@ -3,6 +3,14 @@
 #include "SourceGapLog.h"
 
 #include <QFile>
+#include <QFileInfo>
+
+#ifndef Q_OS_WIN
+#include <poll.h>
+#include <unistd.h>
+
+#include <cerrno>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -267,6 +275,29 @@ bool parsePmt(const QByteArray& section, int* pcrPid, std::set<int>* elementaryP
         offset += 5 + esInfoLength;
     }
     return true;
+}
+
+// How long a partial Object may hold its first packet while a live source is
+// quiet.
+constexpr std::chrono::milliseconds kObjectHoldLimit{50};
+
+// Whether a packet can be read before the deadline. A regular file always
+// has its next packet; a pipe or a packet queue may stay quiet.
+bool packetBefore(QIODevice& device, int packetSize, std::chrono::steady_clock::time_point deadline) {
+    if (!device.isSequential() || device.bytesAvailable() >= packetSize) {
+        return true;
+    }
+    const auto left = std::chrono::ceil<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+    const int msecs = static_cast<int>(std::max<std::int64_t>(0, left.count()));
+    if (auto* file = qobject_cast<QFileDevice*>(&device)) {
+#ifdef Q_OS_WIN
+        return true;
+#else
+        pollfd fd{file->handle(), POLLIN, 0};
+        return ::poll(&fd, 1, msecs) != 0;   // an error or the end: the read reports it
+#endif
+    }
+    return device.waitForReadyRead(msecs);
 }
 
 } // namespace
@@ -546,7 +577,13 @@ void M2tsPacketizer::setSourceGaps(std::shared_ptr<SourceGapLog> gaps) {
 
 bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     m_requestedProgramNumber = requestedProgramNumber;
-    if (!m_device->isOpen() && !m_device->open(QIODevice::ReadOnly)) {
+    // A buffered QFile reads 16 KB at a time, and on a pipe the read waits for
+    // all of it, so a source that is not a regular file is read unbuffered.
+    QIODevice::OpenMode mode = QIODevice::ReadOnly;
+    if (auto* file = qobject_cast<QFile*>(m_device.get()); file && !QFileInfo(file->fileName()).isFile()) {
+        mode |= QIODevice::Unbuffered;
+    }
+    if (!m_device->isOpen() && !m_device->open(mode)) {
         if (error) {
             *error = QStringLiteral("Failed to open M2TS source: %1").arg(m_device->errorString());
         }
@@ -1252,7 +1289,19 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         }
     }
 
+    std::optional<std::chrono::steady_clock::time_point> holdUntil;
     for (int index = 0; index < packets; ++index) {
+        // A source that goes quiet does not hold the packets already read.
+        if (!payload.isEmpty()) {
+            if (!holdUntil) {
+                holdUntil = std::chrono::steady_clock::now() + kObjectHoldLimit;
+            }
+            const bool buffered = !m_carryPacket.isEmpty() || m_prebufferPos < m_prebuffer.size() ||
+                                  m_unread.size() - m_unreadPos >= m_packetSize;
+            if (!buffered && !packetBefore(*m_device, m_packetSize, *holdUntil)) {
+                break;
+            }
+        }
         std::uint64_t packetOffset = 0;
         QByteArray packet = nextSourcePacket(&packetOffset);
         if (packet.isEmpty()) {
@@ -1844,12 +1893,43 @@ void M2tsPacketizer::continueFrom(const M2tsPacketizer& previous) {
 }
 
 QByteArray M2tsPacketizer::readSourcePacket() {
+    if (m_unread.size() - m_unreadPos < m_packetSize) {
+        fillFromPipe();
+    }
     if (m_unreadPos < m_unread.size()) {
         const QByteArray packet = m_unread.mid(m_unreadPos, m_packetSize);
         m_unreadPos += m_packetSize;
         return packet;
     }
     return m_device->read(m_packetSize);
+}
+
+void M2tsPacketizer::fillFromPipe() {
+#ifndef Q_OS_WIN
+    auto* file = qobject_cast<QFileDevice*>(m_device.get());
+    if (!m_sequential || file == nullptr || file->handle() < 0) {
+        return;
+    }
+    m_unread.remove(0, m_unreadPos);
+    m_unreadPos = 0;
+    // The bytes open() peeked come first.
+    if (const qint64 peeked = m_device->bytesAvailable(); peeked > 0) {
+        m_unread += m_device->read(peeked);
+    }
+    // One read() takes what the pipe holds, up to 64 KB. It waits only while
+    // less than a packet is there.
+    char chunk[64 * 1024];
+    while (m_unread.size() < m_packetSize) {
+        const ssize_t got = ::read(file->handle(), chunk, sizeof chunk);
+        if (got < 0 && errno == EINTR) {
+            continue;
+        }
+        if (got <= 0) {
+            return;   // the end, or an error: the caller gets what is left
+        }
+        m_unread.append(chunk, static_cast<qsizetype>(got));
+    }
+#endif
 }
 
 bool M2tsPacketizer::hasVideo() const {

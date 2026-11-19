@@ -66,6 +66,9 @@ public:
 
     bool isSequential() const override { return true; }
     qint64 bytesAvailable() const override;
+    // Waits up to msecs for a whole packet, the end, or abort(). False on
+    // timeout.
+    bool waitForReadyRead(int msecs) override;
 
 protected:
     qint64 readData(char* data, qint64 maxSize) override;

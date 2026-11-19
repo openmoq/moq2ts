@@ -3,6 +3,7 @@
 #include "SourceGapLog.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <utility>
 
@@ -116,6 +117,13 @@ std::shared_ptr<SourceGapLog> PacketQueueDevice::gaps() const {
 qint64 PacketQueueDevice::bytesAvailable() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     return (m_queue.size() - m_head) + QIODevice::bytesAvailable();
+}
+
+bool PacketQueueDevice::waitForReadyRead(int msecs) {
+    std::unique_lock<std::mutex> lock(m_mutex);
+    return m_wake.wait_for(lock, std::chrono::milliseconds(msecs), [&] {
+        return m_aborted || m_finished || m_queue.size() - m_head >= m_packetSize;
+    });
 }
 
 qint64 PacketQueueDevice::readData(char* data, qint64 maxSize) {
