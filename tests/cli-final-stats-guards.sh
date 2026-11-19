@@ -21,6 +21,12 @@ grep -q '\[final\] %s' "$CLI" \
 grep -q 'sentTotals' "$CLI" \
   || fail "the sent counts must come from MoqxrPublisher::sentTotals"
 
+# The periodic [stats] line carries what moqxr has sent so far, read from the
+# publisher while it runs.
+grep -q 'sentFields()' "$CLI" \
+  || fail "the periodic [stats] line must print sent_objects and sent_bytes"
+grep -q 'sentSoFar' "$CLI" \
+  || fail "the sent counts of the [stats] line must come from MoqxrPublisher::sentSoFar"
 
 # The totals are written from the worker threads: the recorders connect directly.
 grep -q 'Qt::DirectConnection' "$CLI" \

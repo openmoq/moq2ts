@@ -675,15 +675,23 @@ int main(int argc, char** argv) {
     // Throttle stats to roughly one line per second to keep server logs readable.
     auto* statsClock = new QElapsedTimer();
     statsClock->start();
+    // The sent counts are what moqxr wrote, read from it while the publish runs:
+    // the pulled ones in [final] are those handed to it, which differ while
+    // nobody subscribes.
     QObject::connect(&pipeline, &moq2ts::LivePipeline::stats, &app,
-                     [statsClock](int64_t objects, int64_t bytes, int64_t groups) {
+                     [statsClock, totals, &publisher](int64_t objects, int64_t bytes, int64_t groups) {
                          if (statsClock->elapsed() < 1000) {
                              return;
                          }
                          statsClock->restart();
-                         std::fprintf(stdout, "[stats] objects=%lld bytes=%lld groups=%lld\n",
+                         int64_t sentObjects = 0;
+                         int64_t sentBytes = 0;
+                         if (publisher.sentSoFar(sentObjects, sentBytes)) {
+                             totals->publish.observeSent(sentObjects, sentBytes);
+                         }
+                         std::fprintf(stdout, "[stats] objects=%lld bytes=%lld groups=%lld %s\n",
                                       static_cast<long long>(objects), static_cast<long long>(bytes),
-                                      static_cast<long long>(groups));
+                                      static_cast<long long>(groups), qUtf8Printable(totals->publish.sentFields()));
                          std::fflush(stdout);
                      });
 #ifdef MOQ2TS_HAS_SRT
