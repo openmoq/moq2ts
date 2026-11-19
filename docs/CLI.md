@@ -337,8 +337,12 @@ macOS only; a Windows build rejects it.
 invalid file exits with code 2, and the error names the field and the value. A
 program that ends, or whose read fails, ends its own track; the others go on.
 A program that does not open at start-up, because the PAT does not list it or
-its PMT does not come within 1 s of PCR time, is logged as an error and left
-out of the catalog; the others publish, and the exit code is 1. With
+its PMT does not come within 1 s of PCR time, is logged and left out of the
+catalog while the others publish. It keeps waiting, and when its PAT and PMT
+come, it joins: a new catalog lists it before its first Object. A program that
+never opened by the end of the source is logged as an error then, and the exit
+code is 1. While it waits, each attempt reads about 1 s of the source's PCR
+time. With
 `strict_start`, it stops every program instead. Only when no program opens does
 the start fail.
 

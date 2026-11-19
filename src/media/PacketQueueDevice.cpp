@@ -105,6 +105,11 @@ void PacketQueueDevice::abort() {
     m_wake.notify_all();
 }
 
+bool PacketQueueDevice::ended() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_aborted || (m_finished && m_queue.size() == m_head);
+}
+
 qint64 PacketQueueDevice::droppedBytes() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_dropped;

@@ -39,7 +39,8 @@ struct MptsConfig {
     // Where SRT ingest skipped ahead in the source; null outside SRT ingest.
     std::shared_ptr<SourceGapLog> sourceGaps;
     // A program that does not open at start-up fails every program. Without
-    // it, the others publish and programEnded() reports that one.
+    // it, the others publish, and that program joins the catalog when it
+    // opens (status() reports both).
     bool strictStart = false;
 };
 
@@ -85,9 +86,9 @@ signals:
     void status(const QString& message);
     // A start-up or publish error, which ends the pipeline.
     void error(const QString& message);
-    // A program that did not open at start-up, or a read error of one program,
-    // which ends that program's track only; the session goes on with the
-    // other programs.
+    // A read error of one program, which ends that program's track only, or a
+    // program that never opened by the end of its source; the session goes
+    // on with the other programs.
     void programEnded(int program, const QString& reason);
     // The publisher's first pull: every program queue dropped what it held,
     // so what the source sends from now on is what the tracks start with.

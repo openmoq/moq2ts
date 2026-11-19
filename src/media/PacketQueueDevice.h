@@ -60,6 +60,9 @@ public:
     void finish();
     // Wakes a blocked reader at once, and discards what is queued.
     void abort();
+    // No more data will come, and none is queued: after finish() once the
+    // reader took the rest, or after abort().
+    bool ended() const;
     // Bytes dropped by overflow so far.
     qint64 droppedBytes() const;
     std::shared_ptr<SourceGapLog> gaps() const;
