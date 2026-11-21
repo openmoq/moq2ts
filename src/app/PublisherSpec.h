@@ -22,8 +22,9 @@ struct SrtIngestSpec {
 // One multi-program publisher: the relay session, one live source, and the
 // programs published as per-program tracks (draft "Per-Program").
 struct PublisherSpec {
-    // The relay settings: moqEndpoint, namespaceName, draftVersion, and
-    // insecure, and the media timeline: timelineTrack and accessibleWindowMs.
+    // The relay settings: moqEndpoint (and moqEndpoints for several relays),
+    // namespaceName, draftVersion, and insecure, and the media timeline:
+    // timelineTrack and accessibleWindowMs.
     PublishConfig relay;
     // Exactly one ingest is set: srt (srt.mode not empty) or sourcePath (a FIFO).
     SrtIngestSpec srt;
@@ -44,9 +45,10 @@ struct PublisherSpec {
 //     "segment_bytes": 65536,
 //     "timeline": true, "accessible_window_ms": 300000, "strict_start": false
 //   }
-// "ingest" holds exactly one of "srt" or "path" (a FIFO). An unknown key
-// fails. On failure, error names the field and the value, and out is left
-// unchanged.
+// "endpoint" is one endpoint, or a list of them: the same Objects then go to
+// each relay (PublishConfig::moqEndpoints). "ingest" holds exactly one of
+// "srt" or "path" (a FIFO). An unknown key fails. On failure, error names the
+// field and the value, and out is left unchanged.
 bool parsePublisherSpec(const QByteArray& json, PublisherSpec* out, QString* error);
 
 } // namespace moq2ts

@@ -34,6 +34,7 @@
 #include "app/PublishConfig.h"
 #include "media/LivePipeline.h"
 #include "publish/MoqxrPublisher.h"
+#include "publish/RedundantPublisher.h"
 
 #ifdef MOQ2TS_HAS_MPTS
 #include "app/PublisherSpec.h"
@@ -53,6 +54,33 @@ void handleSignal(int) {
 void logLine(std::FILE* stream, const char* tag, const QString& message) {
     std::fprintf(stream, "[%s] %s\n", tag, message.toLocal8Bit().constData());
     std::fflush(stream);
+}
+
+// Several relays: the composite output, with its errors and connection states
+// logged as those of a MoqxrPublisher are. Null for one relay, which keeps the
+// MoqxrPublisher alone.
+std::unique_ptr<moq2ts::RedundantPublisher> makeRedundantPublisher(QCoreApplication& app, const moq2ts::PublishConfig& cfg,
+                                                                  std::atomic<bool>& failed) {
+    if (!moq2ts::RedundantPublisher::needed(cfg)) {
+        return nullptr;
+    }
+    auto redundant = std::make_unique<moq2ts::RedundantPublisher>();
+    QObject::connect(redundant.get(), &moq2ts::RedundantPublisher::publishError, &app, [&failed](const QString& m) {
+        failed.store(true, std::memory_order_release);
+        logLine(stderr, "error", m);
+    });
+    QObject::connect(redundant.get(), &moq2ts::RedundantPublisher::connectionStateChanged, &app,
+                     [](bool, const QString& m) { logLine(stderr, "conn", m); });
+    return redundant;
+}
+
+// One line per relay path, tagged [stats] or [final].
+void printPathLines(const char* tag, moq2ts::RedundantPublisher& redundant, bool final) {
+    for (int path = 0; path < redundant.pathCount(); ++path) {
+        const QString fields = final ? redundant.pathFinalFields(path) : redundant.pathStatsFields(path);
+        std::fprintf(stdout, "[%s] %s\n", tag, qUtf8Printable(fields));
+    }
+    std::fflush(stdout);
 }
 
 #ifdef MOQ2TS_HAS_SRT
@@ -194,9 +222,11 @@ int runConfig(QCoreApplication& app, const QString& path) {
     }
 #endif  // MOQ2TS_HAS_SRT
 
-    moq2ts::MoqxrPublisher publisher;
-    moq2ts::MptsPipeline pipeline;
     std::atomic<bool> failed{false};
+    moq2ts::MoqxrPublisher publisher;
+    const std::unique_ptr<moq2ts::RedundantPublisher> redundant = makeRedundantPublisher(app, spec.relay, failed);
+    moq2ts::IMoqOutput* output = redundant ? static_cast<moq2ts::IMoqOutput*>(redundant.get()) : &publisher;
+    moq2ts::MptsPipeline pipeline;
 
     QObject::connect(&pipeline, &moq2ts::MptsPipeline::status, &app, [](const QString& m) {
         logLine(stderr, "status", m);
@@ -229,11 +259,11 @@ int runConfig(QCoreApplication& app, const QString& path) {
                      [publishTotals](int64_t objects, int64_t bytes) { publishTotals->recordSent(objects, bytes); },
                      Qt::DirectConnection);
 
-    if (!publisher.connect(spec.relay)) {
+    if (!output->connect(spec.relay)) {
         logLine(stderr, "error", QStringLiteral("Could not open MOQ publish session."));
         return 1;
     }
-    pipeline.start(spec.relay, mpts, &publisher);
+    pipeline.start(spec.relay, mpts, output);
 
     // As in main(): poll for SIGINT/SIGTERM and for the end of every program.
     // Local, so it cannot fire after the pipeline it reads has gone.
@@ -257,11 +287,15 @@ int runConfig(QCoreApplication& app, const QString& path) {
     QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [&]() {
         // The publisher first: it ends a publish that waits for a subscriber,
         // which MptsPipeline::stop() leaves to its caller.
-        publisher.stop();
+        output->stop();
         pipeline.stop();
 #ifdef MOQ2TS_HAS_SRT
         srtIngest.stop();
 #endif  // MOQ2TS_HAS_SRT
+        if (redundant) {
+            printPathLines("final", *redundant, true);
+            return;
+        }
         std::fprintf(stdout, "[final] %s\n", qUtf8Printable(publishTotals->finalFields()));
         std::fflush(stdout);
     });
@@ -297,7 +331,8 @@ int main(int argc, char** argv) {
     };
 
     // Session.
-    addValue(QStringLiteral("endpoint"), QStringLiteral("MOQ relay endpoint (mock://... for mock builds)."),
+    addValue(QStringLiteral("endpoint"), QStringLiteral("MOQ relay endpoint (mock://... for mock builds). Give it "
+                                                        "twice to publish the same Objects to two relays."),
              QStringLiteral("url"), QStringLiteral("mock://local"));
     addValue(QStringLiteral("namespace"), QStringLiteral("MOQ track namespace."),
              QStringLiteral("ns"), QStringLiteral("live/ch1"));
@@ -409,7 +444,12 @@ int main(int argc, char** argv) {
     }
 
     moq2ts::PublishConfig cfg;
-    cfg.moqEndpoint = parser.value(QStringLiteral("endpoint"));
+    const QStringList endpoints = parser.values(QStringLiteral("endpoint"));
+    cfg.moqEndpoint = endpoints.value(0);
+    // Several relays get the same Objects (RedundantPublisher).
+    if (endpoints.size() > 1) {
+        cfg.moqEndpoints = endpoints;
+    }
     cfg.namespaceName = parser.value(QStringLiteral("namespace"));
     cfg.videoSource = parser.value(QStringLiteral("video"));
     cfg.audioSource = parser.value(QStringLiteral("audio"));
@@ -620,14 +660,21 @@ int main(int argc, char** argv) {
         logLine(stderr, "error", QStringLiteral("A source is required: --video/--audio (TS path), --camera/--mic, or --srt."));
         return 2;
     }
-    if (cfg.moqEndpoint.isEmpty() || cfg.namespaceName.isEmpty()) {
+    if (cfg.moqEndpoint.isEmpty() || cfg.namespaceName.isEmpty() || cfg.moqEndpoints.contains(QString())) {
         logLine(stderr, "error", QStringLiteral("--endpoint and --namespace must be non-empty."));
         return 2;
     }
+    if (cfg.moqEndpoints.removeDuplicates() > 0) {
+        logLine(stderr, "error", QStringLiteral("--endpoint names the same relay twice."));
+        return 2;
+    }
 
-    moq2ts::MoqxrPublisher publisher;
-    moq2ts::LivePipeline pipeline;
     std::atomic<bool> failed{false};
+    moq2ts::MoqxrPublisher publisher;
+    // Declared before the pipeline, so that it outlives it.
+    const std::unique_ptr<moq2ts::RedundantPublisher> redundant = makeRedundantPublisher(app, cfg, failed);
+    moq2ts::IMoqOutput* output = redundant ? static_cast<moq2ts::IMoqOutput*>(redundant.get()) : &publisher;
+    moq2ts::LivePipeline pipeline;
 
     QObject::connect(&pipeline, &moq2ts::LivePipeline::status, &app, [](const QString& m) {
         logLine(stderr, "status", m);
@@ -678,12 +725,21 @@ int main(int argc, char** argv) {
     // The sent counts are what moqxr wrote, read from it while the publish runs:
     // the pulled ones in [final] are those handed to it, which differ while
     // nobody subscribes.
+    // With several relays, one line per path follows, with the path's counts.
     QObject::connect(&pipeline, &moq2ts::LivePipeline::stats, &app,
-                     [statsClock, totals, &publisher](int64_t objects, int64_t bytes, int64_t groups) {
+                     [statsClock, totals, &publisher, redundant = redundant.get()](int64_t objects, int64_t bytes,
+                                                                                    int64_t groups) {
                          if (statsClock->elapsed() < 1000) {
                              return;
                          }
                          statsClock->restart();
+                         if (redundant != nullptr) {
+                             std::fprintf(stdout, "[stats] objects=%lld bytes=%lld groups=%lld\n",
+                                          static_cast<long long>(objects), static_cast<long long>(bytes),
+                                          static_cast<long long>(groups));
+                             printPathLines("stats", *redundant, false);
+                             return;
+                         }
                          int64_t sentObjects = 0;
                          int64_t sentBytes = 0;
                          if (publisher.sentSoFar(sentObjects, sentBytes)) {
@@ -708,12 +764,12 @@ int main(int argc, char** argv) {
     }
 #endif
 
-    if (!publisher.connect(cfg)) {
+    if (!output->connect(cfg)) {
         logLine(stderr, "error", QStringLiteral("Could not open MOQ publish session."));
         return 1;
     }
 
-    pipeline.start(cfg, &publisher);
+    pipeline.start(cfg, output);
 
     // Poll for SIGINT/SIGTERM and for natural completion (the worker flips
     // running() false at EOF). started only after start() so running() is true.
@@ -737,7 +793,7 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, handleSignal);
 
     QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [&]() {
-        publisher.stop();
+        output->stop();
         pipeline.requestStop();
 #ifdef MOQ2TS_HAS_SRT
         // Stop SRT thread if running. srt_cleanup() itself is left to the
@@ -745,6 +801,14 @@ int main(int argc, char** argv) {
         srtIngest.stop();
 #endif  // MOQ2TS_HAS_SRT
         pipeline.waitForStopped(); // bounded (3s) + detach fallback
+        if (redundant) {
+            std::fprintf(stdout, "[final] objects=%lld bytes=%lld groups=%lld\n",
+                         static_cast<long long>(totals->objects.load(std::memory_order_relaxed)),
+                         static_cast<long long>(totals->bytes.load(std::memory_order_relaxed)),
+                         static_cast<long long>(totals->groups.load(std::memory_order_relaxed)));
+            printPathLines("final", *redundant, true);
+            return;
+        }
         std::fprintf(stdout, "[final] objects=%lld bytes=%lld groups=%lld %s\n",
                      static_cast<long long>(totals->objects.load(std::memory_order_relaxed)),
                      static_cast<long long>(totals->bytes.load(std::memory_order_relaxed)),

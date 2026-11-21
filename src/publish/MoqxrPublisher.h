@@ -149,6 +149,14 @@ public:
     bool sentSoFar(int64_t& objects, int64_t& bytes) const;
     bool connected() const override;
 
+    // Called at the start of each connection of a live publish to a relay,
+    // with its index from 0 in that publish, before the catalog goes out. A
+    // RedundantPublisher drops there what the path can no longer send in
+    // order. A catalog it returns is newer than the one the connection would
+    // send first, and replaces it. Set it before the publish starts.
+    using ConnectionStartHook = std::function<std::optional<QByteArray>(int connection)>;
+    void setConnectionStartHook(ConnectionStartHook hook) { m_connectionStartHook = std::move(hook); }
+
     // The MOQT drafts that --draft accepts with the pinned moqxr SDK.
     // A relay accepts only the drafts in its config, so an
     // unsupported value is refused rather than replaced by another draft.
@@ -211,6 +219,8 @@ private:
     // the retry rule of a process whose connection has worked. Only the
     // publish thread touches it, one publish at a time.
     ReconnectPolicy m_reconnectPolicy;
+    // Empty unless a RedundantPublisher owns this publisher.
+    ConnectionStartHook m_connectionStartHook;
     // What the connections that ended sent, summed. Guarded by m_mutex.
     int64_t m_sentEndedObjects = 0;
     int64_t m_sentEndedBytes = 0;

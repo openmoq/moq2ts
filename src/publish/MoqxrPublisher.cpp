@@ -266,7 +266,9 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
             return !m_connected;
         };
 
+        int connections = 0;
         for (;;) {
+            const int connection = connections++;
             openmoq::publisher::LiveObjectSource source;
             source.tracks.push_back({.track_name = kCatalogTrackName});
             source.tracks.push_back({.track_name = mediaTrackName.toStdString()});
@@ -285,9 +287,14 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
             // ObjectLookahead holds back one object per track until the next object
             // of that track shows whether its group ended, so a track that stalls
             // never holds back another track's objects.
-            source.next_object = [this, state, lookahead, catalogSent]() mutable -> std::optional<openmoq::publisher::LiveObject> {
+            source.next_object = [this, state, lookahead, catalogSent, connection]() mutable -> std::optional<openmoq::publisher::LiveObject> {
                 if (!catalogSent) {
                     catalogSent = true;
+                    if (m_connectionStartHook) {
+                        if (std::optional<QByteArray> newer = m_connectionStartHook(connection)) {
+                            state->catalog = *newer;
+                        }
+                    }
                     const int64_t objects = state->objects.fetch_add(1, std::memory_order_acq_rel) + 1;
                     const int64_t bytes = state->bytes.fetch_add(state->catalog.size(), std::memory_order_acq_rel) +
                                           state->catalog.size();
