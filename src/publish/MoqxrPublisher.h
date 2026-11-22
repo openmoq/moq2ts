@@ -77,6 +77,21 @@ public:
         raise(m_observedObjects, objects);
         raise(m_observedBytes, bytes);
     }
+    std::int64_t pulledObjects() const { return m_pulledObjects.load(std::memory_order_relaxed); }
+    std::int64_t pulledBytes() const { return m_pulledBytes.load(std::memory_order_relaxed); }
+    // The latest reading of the sent counts, -1 before the first.
+    std::int64_t observedObjects() const { return m_observedObjects.load(std::memory_order_relaxed); }
+    std::int64_t observedBytes() const { return m_observedBytes.load(std::memory_order_relaxed); }
+    // The sent counts that finalFields() prints: the final ones, or the latest
+    // reading when moqxr gave none, -1 when there is neither.
+    std::int64_t finalSentObjects() const {
+        const std::int64_t value = m_sentObjects.load(std::memory_order_relaxed);
+        return value >= 0 ? value : observedObjects();
+    }
+    std::int64_t finalSentBytes() const {
+        const std::int64_t value = m_sentBytes.load(std::memory_order_relaxed);
+        return value >= 0 ? value : observedBytes();
+    }
     // "sent_objects=N sent_bytes=B" for the periodic line: the latest reading,
     // "unknown" before the first one.
     QString sentFields() const {

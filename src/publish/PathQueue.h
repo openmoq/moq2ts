@@ -29,7 +29,9 @@ inline constexpr std::int64_t kPathQueueBytes = 5 * 1024 * 1024;
 // A Group that has not started is dropped whole when it does not fit: its
 // queued Objects are taken back out, with its timeline Object (afterTrack names
 // the media track), and the rest of it is dropped as it comes. The bound can
-// therefore be exceeded by the rest of one started Group per track. Catalog
+// therefore be exceeded by the rest of one started Group per track, and by a
+// Group that has no other Group of its track queued, which is taken whatever
+// its size (a Group larger than the bound would else never go out). Catalog
 // Objects and the endsTrack and endsBroadcast markers are never dropped: they
 // are small, and a path needs them to send the latest catalog and to end its
 // tracks. Thread-safe.
@@ -70,7 +72,7 @@ public:
                 return;
             }
             const bool keep = admit(object);
-            if (!object.endsTrack && !object.endsBroadcast && object.trackName != QLatin1String(kCatalogTrackName)) {
+            if (isMedia(object)) {
                 m_lastGroup[object.trackName] = object.groupId;
             }
             if (!keep) {
@@ -196,10 +198,24 @@ private:
         if (sending != m_sending.end() && sending->second == object.groupId) {
             return true;  // a started Group is finished, past the bound if need be
         }
-        if (m_bytes + object.payload.size() > m_maxBytes) {
+        if (m_bytes + object.payload.size() > m_maxBytes && !aloneOnTrack(object)) {
             takeBackGroup(object.trackName, object.groupId);
             m_dropping[object.trackName] = object.groupId;
             return false;
+        }
+        return true;
+    }
+
+    // Whether no Object of another Group of object's track is queued. A Group
+    // that is alone on its track is taken even when it, or the other tracks
+    // queued, take the queue past the bound: else a Group larger than the bound
+    // would never be sent, and every Group of the path would be dropped.
+    bool aloneOnTrack(const PublishedObject& object) const {
+        for (const PublishedObject& queued : m_objects) {
+            if (queued.groupId != object.groupId && !queued.endsTrack && !queued.endsBroadcast &&
+                (queued.trackName == object.trackName || queued.afterTrack == object.trackName)) {
+                return false;
+            }
         }
         return true;
     }
@@ -229,7 +245,7 @@ private:
     std::int64_t m_bytes = 0;
     // The Group of each track whose remaining Objects are dropped.
     std::map<QString, std::uint64_t> m_dropping;
-    // The Group of the latest Object pushed on each media or timeline track.
+    // The Group of the latest Object pushed on each media track.
     std::map<QString, std::uint64_t> m_lastGroup;
     // The Group each media track is sending: the Group of its last popped Object.
     std::map<QString, std::uint64_t> m_sending;

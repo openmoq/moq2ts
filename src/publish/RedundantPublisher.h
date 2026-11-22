@@ -36,10 +36,15 @@ public:
     // How long a path that waits for an Object waits before it checks for a
     // stop request.
     static constexpr std::chrono::milliseconds kPopWait{100};
-    // Once the source has ended, a path that takes no Object for this long
-    // (its relay is down, or it waits to connect again) is stopped, so that it
-    // cannot hold up the end of the publish.
+    // Once the source has ended, a path that has started to publish and then
+    // takes no Object for this long (its relay is down, or it waits to connect
+    // again) is stopped, so that it cannot hold up the end of the publish.
     static constexpr std::chrono::seconds kDrainTimeout{5};
+    // Once the source has ended, a path that has taken no Object yet (it waits
+    // for its first subscriber, or is still connecting), or that has taken the
+    // end of its queue and has not finished its session (the final catalog or
+    // the FIN is not acknowledged), is given this long before it is stopped.
+    static constexpr std::chrono::seconds kIdleTimeout{30};
 
     explicit RedundantPublisher(QObject* parent = nullptr);
     RedundantPublisher(PathFactory factory, std::int64_t queueBytes, QObject* parent = nullptr);
@@ -60,10 +65,23 @@ public:
     void stop() override;
     bool connected() const override;
 
+    // Replaces the two timeouts above, for a source that ends before its
+    // relays are ready, or for tests.
+    void setTimeouts(std::chrono::milliseconds drain, std::chrono::milliseconds idle) {
+        m_drainTimeout = drain;
+        m_idleTimeout = idle;
+    }
+
     int pathCount() const { return static_cast<int>(m_paths.size()); }
     // "path=N sent_objects=… sent_bytes=… dropped_objects=… dropped_bytes=…
     // queued_bytes=…" for the periodic line, with what moqxr has sent so far.
     QString pathStatsFields(int path);
+    // The fields of the aggregate [stats] and [final] lines, summed over the
+    // paths: "sent_objects=… sent_bytes=…" and "pulled_objects=… pulled_bytes=…
+    // sent_objects=… sent_bytes=…", in the format of a single relay. "unknown"
+    // while no path has a sent count.
+    QString statsFields();
+    QString finalFields() const;
     // "path=N pulled_objects=… pulled_bytes=… sent_objects=… sent_bytes=…
     // dropped_objects=… dropped_bytes=…" for the line printed at exit.
     QString pathFinalFields(int path) const;
@@ -98,7 +116,12 @@ private:
 
     PathFactory m_factory;
     std::int64_t m_queueBytes = kPathQueueBytes;
-    // Made by the first connect(), on the thread that owns this object.
+    std::chrono::milliseconds m_drainTimeout{kDrainTimeout};
+    std::chrono::milliseconds m_idleTimeout{kIdleTimeout};
+    // The endpoints the paths were made for.
+    QStringList m_endpoints;
+    // Made by the first connect(), on the thread that owns this object. A
+    // later connect() must name the same endpoints.
     std::vector<std::unique_ptr<Path>> m_paths;
     std::atomic<bool> m_connected{false};
 };

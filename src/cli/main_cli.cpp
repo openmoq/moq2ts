@@ -64,6 +64,11 @@ std::unique_ptr<moq2ts::RedundantPublisher> makeRedundantPublisher(QCoreApplicat
     if (!moq2ts::RedundantPublisher::needed(cfg)) {
         return nullptr;
     }
+    // One set of credentials serves every relay, so the token goes to all of them.
+    if (!cfg.authToken.isEmpty() || !cfg.authTokenFile.isEmpty()) {
+        logLine(stderr, "warn", QStringLiteral("The authorization token is sent to each of the %1 relays.")
+                                    .arg(cfg.moqEndpoints.size()));
+    }
     auto redundant = std::make_unique<moq2ts::RedundantPublisher>();
     QObject::connect(redundant.get(), &moq2ts::RedundantPublisher::publishError, &app, [&failed](const QString& m) {
         failed.store(true, std::memory_order_release);
@@ -293,6 +298,8 @@ int runConfig(QCoreApplication& app, const QString& path) {
         srtIngest.stop();
 #endif  // MOQ2TS_HAS_SRT
         if (redundant) {
+            // The totals are summed over the relays; one line per relay follows.
+            std::fprintf(stdout, "[final] %s\n", qUtf8Printable(redundant->finalFields()));
             printPathLines("final", *redundant, true);
             return;
         }
@@ -385,7 +392,8 @@ int main(int argc, char** argv) {
                        "Group. It exits with status 1 when 10 attempts fail before any connection has worked.")));
     addValue(QStringLiteral("auth-token-file"),
              QStringLiteral("A file that holds the authorization token that the session setup carries, as raw bytes "
-                            "or as text that starts with \"base64:\" or \"hex:\". moq2ts never logs it."),
+                            "or as text that starts with \"base64:\" or \"hex:\". moq2ts never logs it. With several "
+                            "--endpoint values the same token, token type and --insecure go to every relay."),
              QStringLiteral("path"));
     addValue(QStringLiteral("auth-token-type"),
              QStringLiteral("The token type of the authorization token, as the relay expects it (moqx: "
@@ -734,9 +742,9 @@ int main(int argc, char** argv) {
                          }
                          statsClock->restart();
                          if (redundant != nullptr) {
-                             std::fprintf(stdout, "[stats] objects=%lld bytes=%lld groups=%lld\n",
+                             std::fprintf(stdout, "[stats] objects=%lld bytes=%lld groups=%lld %s\n",
                                           static_cast<long long>(objects), static_cast<long long>(bytes),
-                                          static_cast<long long>(groups));
+                                          static_cast<long long>(groups), qUtf8Printable(redundant->statsFields()));
                              printPathLines("stats", *redundant, false);
                              return;
                          }
@@ -802,10 +810,13 @@ int main(int argc, char** argv) {
 #endif  // MOQ2TS_HAS_SRT
         pipeline.waitForStopped(); // bounded (3s) + detach fallback
         if (redundant) {
-            std::fprintf(stdout, "[final] objects=%lld bytes=%lld groups=%lld\n",
+            // The sent and pulled totals are summed over the relays; one line per
+            // relay follows.
+            std::fprintf(stdout, "[final] objects=%lld bytes=%lld groups=%lld %s\n",
                          static_cast<long long>(totals->objects.load(std::memory_order_relaxed)),
                          static_cast<long long>(totals->bytes.load(std::memory_order_relaxed)),
-                         static_cast<long long>(totals->groups.load(std::memory_order_relaxed)));
+                         static_cast<long long>(totals->groups.load(std::memory_order_relaxed)),
+                         qUtf8Printable(redundant->finalFields()));
             printPathLines("final", *redundant, true);
             return;
         }

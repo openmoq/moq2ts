@@ -3,6 +3,7 @@
 #include <QDebug>
 #include <QThread>
 
+#include <algorithm>
 #include <thread>
 
 namespace moq2ts {
@@ -70,6 +71,12 @@ bool RedundantPublisher::connect(const PublishConfig& cfg) {
         for (int index = 0; index < cfg.moqEndpoints.size(); ++index) {
             m_paths.push_back(makePath(index, cfg.moqEndpoints.at(index)));
         }
+        m_endpoints = cfg.moqEndpoints;
+    } else if (cfg.moqEndpoints != m_endpoints) {
+        // The paths and their queues belong to the first call's relays.
+        emit publishError(QStringLiteral("The relays of a publisher cannot change: it was made for %1.")
+                              .arg(m_endpoints.join(QStringLiteral(", "))));
+        return false;
     }
     if (m_paths.size() < 2) {
         emit publishError(QStringLiteral("Publishing to several relays needs two endpoints or more."));
@@ -191,8 +198,10 @@ bool RedundantPublisher::publishLiveObjects(const PublishConfig& cfg,
 
 void RedundantPublisher::waitForPaths() {
     const std::size_t count = m_paths.size();
-    std::vector<std::int64_t> popped(count, -1);
-    std::vector<std::chrono::steady_clock::time_point> progress(count, std::chrono::steady_clock::now());
+    const auto start = std::chrono::steady_clock::now();
+    std::vector<std::int64_t> popped(count, 0);
+    std::vector<std::chrono::steady_clock::time_point> progress(count, start);
+    std::vector<bool> endSeen(count, false);
     std::vector<bool> stopped(count, false);
     for (;;) {
         bool waiting = false;
@@ -203,19 +212,31 @@ void RedundantPublisher::waitForPaths() {
                 continue;
             }
             waiting = true;
-            // stop() stops every path; a path that took the end of its queue
-            // ends its session on its own.
-            const PathQueue::Counters counters = path.queue.counters();
-            if (!m_connected.load(std::memory_order_acquire) || counters.endTaken || stopped[index]) {
+            // stop() stops every path.
+            if (!m_connected.load(std::memory_order_acquire) || stopped[index]) {
                 continue;
             }
+            const PathQueue::Counters counters = path.queue.counters();
             if (counters.popped != popped[index]) {
                 popped[index] = counters.popped;
                 progress[index] = now;
-            } else if (now - progress[index] >= kDrainTimeout) {
-                qWarning("path=%d: %s took no Object for %lld s after the source ended (%lld left); stopping it.",
+            }
+            if (counters.endTaken && !endSeen[index]) {
+                endSeen[index] = true;  // the clock for the end of its session starts now
+                progress[index] = now;
+            }
+            // A path that is publishing and stalls is stopped soon. One that
+            // has taken nothing yet, or has taken the end and not finished,
+            // may only be slow (no subscriber yet, a session that ends), so it
+            // gets longer.
+            const bool slowToStart = counters.popped == 0 || endSeen[index];
+            const std::chrono::milliseconds limit = slowToStart ? m_idleTimeout : m_drainTimeout;
+            if (now - progress[index] >= limit) {
+                qWarning("path=%d: %s %s for %lld ms after the source ended (%lld Objects left); stopping it.",
                          static_cast<int>(index), qUtf8Printable(path.endpoint),
-                         static_cast<long long>(kDrainTimeout.count()), static_cast<long long>(counters.queuedObjects));
+                         endSeen[index] ? "did not finish its session"
+                                        : (counters.popped == 0 ? "took no Object" : "took no further Object"),
+                         static_cast<long long>(limit.count()), static_cast<long long>(counters.queuedObjects));
                 stopped[index] = true;
                 path.output->stop();
             }
@@ -223,7 +244,7 @@ void RedundantPublisher::waitForPaths() {
         if (!waiting) {
             return;
         }
-        QThread::msleep(100);
+        QThread::msleep(20);
     }
 }
 
@@ -240,6 +261,48 @@ void RedundantPublisher::stop() {
 
 bool RedundantPublisher::connected() const {
     return m_connected.load(std::memory_order_acquire);
+}
+
+QString RedundantPublisher::statsFields() {
+    int64_t objects = -1;
+    int64_t bytes = -1;
+    for (auto& path : m_paths) {
+        int64_t pathObjects = 0;
+        int64_t pathBytes = 0;
+        if (path->moqxr != nullptr && path->moqxr->sentSoFar(pathObjects, pathBytes)) {
+            path->totals.observeSent(pathObjects, pathBytes);
+        }
+        pathObjects = path->totals.observedObjects();
+        pathBytes = path->totals.observedBytes();
+        if (pathObjects >= 0) {
+            objects = std::max<int64_t>(objects, 0) + pathObjects;
+            bytes = std::max<int64_t>(bytes, 0) + pathBytes;
+        }
+    }
+    const auto text = [](int64_t value) { return value < 0 ? QStringLiteral("unknown") : QString::number(value); };
+    return QStringLiteral("sent_objects=%1 sent_bytes=%2").arg(text(objects), text(bytes));
+}
+
+QString RedundantPublisher::finalFields() const {
+    PublishTotals sum;
+    int64_t pulledObjects = 0;
+    int64_t pulledBytes = 0;
+    int64_t sentObjects = -1;
+    int64_t sentBytes = -1;
+    for (const auto& path : m_paths) {
+        pulledObjects += path->totals.pulledObjects();
+        pulledBytes += path->totals.pulledBytes();
+        const int64_t objects = path->totals.finalSentObjects();
+        if (objects >= 0) {
+            sentObjects = std::max<int64_t>(sentObjects, 0) + objects;
+            sentBytes = std::max<int64_t>(sentBytes, 0) + path->totals.finalSentBytes();
+        }
+    }
+    sum.recordPulled(pulledObjects, pulledBytes);
+    if (sentObjects >= 0) {
+        sum.recordSent(sentObjects, sentBytes);
+    }
+    return sum.finalFields();
 }
 
 QString RedundantPublisher::pathStatsFields(int index) {
