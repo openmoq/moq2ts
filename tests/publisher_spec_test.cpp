@@ -281,6 +281,42 @@ int main() {
     ok &= rejects(exampleWith(R"(["sdt", "eit-pf", "tdt-tot"])", R"(["  "])"),
                   {QStringLiteral("programs[0].si: \"  \" is not an SI table name")}, "blank SI table name");
 
+    // relay.endpoint: one endpoint keeps one relay; a list of several
+    // publishes to each, and a list of one is one endpoint.
+    {
+        PublisherSpec spec;
+        QString error;
+        const bool parsed = parsePublisherSpec(kExample, &spec, &error);
+        ok &= expect(parsed && spec.relay.moqEndpoints.isEmpty(), "one endpoint: no endpoint list");
+    }
+    {
+        PublisherSpec spec;
+        QString error;
+        const bool parsed = parsePublisherSpec(
+            exampleWith(R"("moqt://relay.example:4433")", R"(["moqt://a.example:4433", "moqt://b.example:4433"])"),
+            &spec, &error);
+        ok &= expect(parsed, "endpoint list parses: " + error.toStdString());
+        ok &= expect(parsed && spec.relay.moqEndpoint == QStringLiteral("moqt://a.example:4433") &&
+                         spec.relay.moqEndpoints ==
+                             QStringList({QStringLiteral("moqt://a.example:4433"), QStringLiteral("moqt://b.example:4433")}),
+                     "endpoint list: both relays, the first as moqEndpoint");
+    }
+    {
+        PublisherSpec spec;
+        QString error;
+        const bool parsed = parsePublisherSpec(
+            exampleWith(R"("moqt://relay.example:4433")", R"(["moqt://a.example:4433"])"), &spec, &error);
+        ok &= expect(parsed && spec.relay.moqEndpoint == QStringLiteral("moqt://a.example:4433") &&
+                         spec.relay.moqEndpoints.isEmpty(),
+                     "endpoint list of one: one relay");
+    }
+    ok &= rejects(exampleWith(R"("moqt://relay.example:4433")", "[]"), {QStringLiteral("relay.endpoint")},
+                  "empty endpoint list");
+    ok &= rejects(exampleWith(R"("moqt://relay.example:4433")", R"(["moqt://a.example:4433", ""])"),
+                  {QStringLiteral("relay.endpoint[1]")}, "empty endpoint in the list");
+    ok &= rejects(exampleWith(R"("moqt://relay.example:4433")", R"(["moqt://a.example:4433", "moqt://a.example:4433"])"),
+                  {QStringLiteral("relay.endpoint[1]"), QStringLiteral("twice")}, "endpoint listed twice");
+
     if (ok) {
         std::cout << "publisher spec tests passed\n";
     }

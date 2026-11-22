@@ -191,6 +191,7 @@ set(CORE_SOURCES
     src/media/M2tsPacketizer.cpp
     src/media/MsftsMuxer.cpp
     src/publish/MoqxrPublisher.cpp
+    src/publish/RedundantPublisher.cpp
 )
 
 if(APPLE)
@@ -217,6 +218,8 @@ set(CORE_HEADERS
     src/media/MsftsMuxer.h
     src/publish/MoqxrPublisher.h
     src/publish/ObjectLookahead.h
+    src/publish/PathQueue.h
+    src/publish/RedundantPublisher.h
 )
 
 add_library(moq2ts-core OBJECT ${CORE_SOURCES} ${CORE_HEADERS})
@@ -510,6 +513,14 @@ if(UNIX AND NOT APPLE)
     target_include_directories(moq2ts-object-lookahead-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(moq2ts-object-lookahead-tests PRIVATE moq2ts-core)
     add_test(NAME moq2ts-object-lookahead-tests COMMAND moq2ts-object-lookahead-tests)
+
+    # Publishing the same Objects to several relays: the per-path queues and
+    # the fan-out, with test paths in place of the relays.
+    add_executable(moq2ts-redundant-publisher-tests tests/redundant_publisher_test.cpp)
+    target_include_directories(moq2ts-redundant-publisher-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-redundant-publisher-tests PRIVATE moq2ts-core)
+    add_test(NAME moq2ts-redundant-publisher-tests COMMAND moq2ts-redundant-publisher-tests)
+    set_tests_properties(moq2ts-redundant-publisher-tests PROPERTIES TIMEOUT 60)
 
     add_executable(moq2ts-reconnect-policy-tests tests/reconnect_policy_test.cpp)
     target_include_directories(moq2ts-reconnect-policy-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

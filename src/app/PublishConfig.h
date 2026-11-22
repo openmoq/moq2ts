@@ -2,6 +2,7 @@
 
 #include <QSet>
 #include <QString>
+#include <QStringList>
 
 #include <atomic>
 #include <memory>
@@ -28,6 +29,10 @@ inline constexpr int kMaxQuicIdleTimeoutMs = 600000;
 
 struct PublishConfig {
     QString moqEndpoint = "mock://local";
+    // The relays to publish to when there are several (--endpoint given more
+    // than once, or a relay.endpoint list): RedundantPublisher sends the same
+    // Objects to each, and moqEndpoint is the first. Empty for one relay.
+    QStringList moqEndpoints;
     QString namespaceName = "live/paul1";
 
     QString videoSource = QString(); // M2TS file/pipe/URL for H.264 source

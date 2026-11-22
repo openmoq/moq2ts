@@ -90,6 +90,35 @@ bool readObject(const QJsonObject& object, const QString& key, const QString& fi
     return true;
 }
 
+// relay.endpoint: one endpoint, or a list of them to publish the same Objects
+// to each relay. A list of one is one endpoint.
+bool readEndpoints(const QJsonObject& object, PublishConfig* relay, QString* error) {
+    const QJsonValue value = object.value(QStringLiteral("endpoint"));
+    if (!value.isArray()) {
+        return readString(object, QStringLiteral("endpoint"), QStringLiteral("relay.endpoint"), true,
+                          &relay->moqEndpoint, error);
+    }
+    const QJsonArray list = value.toArray();
+    if (list.isEmpty()) {
+        return fail(error, QStringLiteral("relay.endpoint: the list is empty."));
+    }
+    QStringList endpoints;
+    for (qsizetype index = 0; index < list.size(); ++index) {
+        const QJsonValue entry = list.at(index);
+        const QString field = QStringLiteral("relay.endpoint[%1]").arg(index);
+        if (!entry.isString() || entry.toString().isEmpty()) {
+            return fail(error, QStringLiteral("%1: %2 is not a non-empty string.").arg(field, jsonText(entry)));
+        }
+        if (endpoints.contains(entry.toString())) {
+            return fail(error, QStringLiteral("%1: %2 is listed twice.").arg(field, jsonText(entry)));
+        }
+        endpoints << entry.toString();
+    }
+    relay->moqEndpoint = endpoints.first();
+    relay->moqEndpoints = endpoints.size() > 1 ? endpoints : QStringList();
+    return true;
+}
+
 bool readRelay(const QJsonObject& root, PublishConfig* relay, QString* error) {
     QJsonObject object;
     if (!readObject(root, QStringLiteral("relay"), QStringLiteral("relay"), &object, error) ||
@@ -98,8 +127,7 @@ bool readRelay(const QJsonObject& root, PublishConfig* relay, QString* error) {
                     QStringLiteral("insecure"), QStringLiteral("auth_token"), QStringLiteral("auth_token_file"),
                     QStringLiteral("auth_token_type"), QStringLiteral("quic_idle_timeout_ms")},
                    error) ||
-        !readString(object, QStringLiteral("endpoint"), QStringLiteral("relay.endpoint"), true, &relay->moqEndpoint,
-                    error) ||
+        !readEndpoints(object, relay, error) ||
         !readString(object, QStringLiteral("namespace"), QStringLiteral("relay.namespace"), true,
                     &relay->namespaceName, error)) {
         return false;
