@@ -95,6 +95,12 @@ it runs. A file source waits 120 s for its first subscriber. When the session
 ends while a live source still runs, without a stop or the end of the source,
 moq2ts logs a warning that says so and exits with code 1.
 
+When the relay accepts the namespace, moq2ts prints `[ready] namespace accepted`
+once on stdout, so that a supervisor can tell that publishing has started. With
+several `--endpoint` values it prints `[ready] path=N namespace accepted` once
+per relay. A relay that accepts again after a reconnection is not reported
+again. A build without moqxr never prints it.
+
 About once per second, a live source prints a `[stats]` line on stdout with the
 media totals `objects`, `bytes`, and `groups`, and `sent_objects` and
 `sent_bytes`, which count what moqxr has sent so far over all the connections of
