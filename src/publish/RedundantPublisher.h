@@ -73,6 +73,9 @@ public:
     }
 
     int pathCount() const { return static_cast<int>(m_paths.size()); }
+    // Whether the relay of path index has accepted the namespace; false for a
+    // path whose output is not a MoqxrPublisher.
+    bool pathNamespaceAccepted(int path) const;
     // "path=N sent_objects=… sent_bytes=… dropped_objects=… dropped_bytes=…
     // queued_bytes=…" for the periodic line, with what moqxr has sent so far.
     QString pathStatsFields(int path);

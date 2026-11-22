@@ -79,6 +79,44 @@ std::unique_ptr<moq2ts::RedundantPublisher> makeRedundantPublisher(QCoreApplicat
     return redundant;
 }
 
+// Prints "[ready] namespace accepted" on stdout, once per relay, when the relay
+// accepts the namespace, so that a supervisor can tell that publishing has
+// started. A relay that accepts again after a reconnection is not reported
+// again. Called from the poll timer; one relay is path 0 of a single
+// MoqxrPublisher.
+class ReadyReporter {
+public:
+    ReadyReporter(const moq2ts::MoqxrPublisher& publisher, const moq2ts::RedundantPublisher* redundant)
+        : m_publisher(publisher),
+          m_redundant(redundant),
+          m_reported(redundant != nullptr ? static_cast<std::size_t>(redundant->pathCount()) : 1, false) {}
+
+    void poll() {
+        for (std::size_t path = 0; path < m_reported.size(); ++path) {
+            if (m_reported[path]) {
+                continue;
+            }
+            const bool accepted = m_redundant != nullptr ? m_redundant->pathNamespaceAccepted(static_cast<int>(path))
+                                                         : m_publisher.namespaceAccepted();
+            if (!accepted) {
+                continue;
+            }
+            m_reported[path] = true;
+            if (m_redundant != nullptr) {
+                std::fprintf(stdout, "[ready] path=%zu namespace accepted\n", path);
+            } else {
+                std::fprintf(stdout, "[ready] namespace accepted\n");
+            }
+            std::fflush(stdout);
+        }
+    }
+
+private:
+    const moq2ts::MoqxrPublisher& m_publisher;
+    const moq2ts::RedundantPublisher* m_redundant;
+    std::vector<bool> m_reported;
+};
+
 // One line per relay path, tagged [stats] or [final].
 void printPathLines(const char* tag, moq2ts::RedundantPublisher& redundant, bool final) {
     for (int path = 0; path < redundant.pathCount(); ++path) {
@@ -272,9 +310,11 @@ int runConfig(QCoreApplication& app, const QString& path) {
 
     // As in main(): poll for SIGINT/SIGTERM and for the end of every program.
     // Local, so it cannot fire after the pipeline it reads has gone.
+    ReadyReporter ready(publisher, redundant.get());
     QTimer poll;
     poll.setInterval(200);
     QObject::connect(&poll, &QTimer::timeout, &app, [&]() {
+        ready.poll();
         if (g_interrupted.load(std::memory_order_acquire)) {
             logLine(stderr, "status", QStringLiteral("Interrupted; stopping."));
             app.quit();
@@ -782,9 +822,11 @@ int main(int argc, char** argv) {
     // Poll for SIGINT/SIGTERM and for natural completion (the worker flips
     // running() false at EOF). started only after start() so running() is true.
     // Local, so it cannot fire after the pipeline it reads has gone.
+    ReadyReporter ready(publisher, redundant.get());
     QTimer poll;
     poll.setInterval(200);
     QObject::connect(&poll, &QTimer::timeout, &app, [&]() {
+        ready.poll();
         if (g_interrupted.load(std::memory_order_acquire)) {
             logLine(stderr, "status", QStringLiteral("Interrupted; stopping."));
             pipeline.requestStop();

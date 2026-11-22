@@ -263,6 +263,11 @@ bool RedundantPublisher::connected() const {
     return m_connected.load(std::memory_order_acquire);
 }
 
+bool RedundantPublisher::pathNamespaceAccepted(int index) const {
+    const Path& path = *m_paths.at(static_cast<std::size_t>(index));
+    return path.moqxr != nullptr && path.moqxr->namespaceAccepted();
+}
+
 QString RedundantPublisher::statsFields() {
     int64_t objects = -1;
     int64_t bytes = -1;

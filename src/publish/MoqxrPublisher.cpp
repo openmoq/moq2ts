@@ -597,6 +597,19 @@ bool MoqxrPublisher::sentSoFar(int64_t& objects, int64_t& bytes) const {
 #endif
 }
 
+bool MoqxrPublisher::namespaceAccepted() const {
+#ifdef MOQ2TS_HAS_MOQXR
+    std::shared_ptr<openmoq::publisher::Publisher> publisher;
+    {
+        QMutexLocker locker(&m_mutex);
+        publisher = m_activePublisher;
+    }
+    return publisher && publisher->stats().namespace_accepted;
+#else
+    return false;
+#endif
+}
+
 void MoqxrPublisher::stop() {
 #ifdef MOQ2TS_HAS_MOQXR
     std::shared_ptr<openmoq::publisher::Publisher> publisherToStop;

@@ -162,6 +162,10 @@ public:
     // What moqxr has sent so far over all the connections of this run, read
     // while the publish runs. False before any connection exists. Thread-safe.
     bool sentSoFar(int64_t& objects, int64_t& bytes) const;
+    // Whether the relay has accepted the namespace in the current session
+    // (moqxr's namespace_accepted). False before the answer, after a rejection,
+    // while no session exists, and in a build without moqxr. Thread-safe.
+    bool namespaceAccepted() const;
     bool connected() const override;
 
     // Called at the start of each connection of a live publish to a relay,
