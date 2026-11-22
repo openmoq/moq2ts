@@ -275,17 +275,48 @@ option(MOQ2TS_ENABLE_SRT "Build SRT ingest when libsrt is available" ON)
 # links it too. Both the library and the POSIX socket headers SrtSource.cpp needs are
 # optional, so the file itself is added conditionally below.
 pkg_check_modules(SRT IMPORTED_TARGET srt)
-# FFmpeg's libavformat is linked against libsrt-gnutls. If we additionally link
-# the default (OpenSSL) libsrt, BOTH copies are loaded into the process; they
-# export the same symbols and each runs its own exit-time destructors against
-# the other's uninitialised state, which segfaults during shutdown. When the
-# gnutls build is present, link that one so exactly one libsrt is loaded.
+# FFmpeg's libavformat links one libsrt flavor, and the process must load that
+# flavor only. If we additionally link the other one, BOTH copies are loaded;
+# they export the same symbols and each runs its own exit-time destructors
+# against the other's uninitialised state, which segfaults during shutdown.
+# Distro FFmpeg builds link libsrt-gnutls, but an FFmpeg built locally (under
+# /usr/local, say) links the default OpenSSL libsrt, so ask libavformat which
+# one it needs. MOQ2TS_AVFORMAT_SRT is "gnutls", "openssl", or empty when
+# libavformat does not use libsrt or cannot be inspected.
+set(MOQ2TS_AVFORMAT_SRT "")
+if(FFMPEG_FOUND AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_library(MOQ2TS_AVFORMAT_LIB NAMES avformat
+        HINTS ${LIBAVFORMAT_LIBDIR} ${LIBAVFORMAT_LIBRARY_DIRS}
+        NO_DEFAULT_PATH)
+    if(NOT MOQ2TS_AVFORMAT_LIB)
+        find_library(MOQ2TS_AVFORMAT_LIB NAMES avformat)
+    endif()
+    if(MOQ2TS_AVFORMAT_LIB)
+        file(GET_RUNTIME_DEPENDENCIES
+            LIBRARIES "${MOQ2TS_AVFORMAT_LIB}"
+            RESOLVED_DEPENDENCIES_VAR _moq2ts_avformat_deps
+            UNRESOLVED_DEPENDENCIES_VAR _moq2ts_avformat_unresolved)
+        foreach(_dep IN LISTS _moq2ts_avformat_deps _moq2ts_avformat_unresolved)
+            get_filename_component(_dep_name "${_dep}" NAME)
+            if(_dep_name MATCHES "^libsrt-gnutls")
+                set(MOQ2TS_AVFORMAT_SRT "gnutls")
+            elseif(_dep_name MATCHES "^libsrt[.-]" AND NOT MOQ2TS_AVFORMAT_SRT)
+                set(MOQ2TS_AVFORMAT_SRT "openssl")
+            endif()
+        endforeach()
+        message(STATUS "libavformat (${MOQ2TS_AVFORMAT_LIB}) links libsrt flavor: ${MOQ2TS_AVFORMAT_SRT}")
+    endif()
+endif()
 find_library(SRT_GNUTLS_LIB
     NAMES libsrt-gnutls.so.1.5 libsrt-gnutls.so srt-gnutls
     PATHS /usr/lib/${CMAKE_LIBRARY_ARCHITECTURE} /usr/lib /usr/local/lib
     NO_DEFAULT_PATH)
 set(MOQ2TS_SRT_USABLE FALSE)
-if(SRT_FOUND AND SRT_GNUTLS_LIB)
+if(SRT_FOUND AND MOQ2TS_AVFORMAT_SRT STREQUAL "openssl")
+    message(STATUS "Linking the default libsrt to match FFmpeg and avoid a duplicate libsrt")
+    target_link_libraries(moq2ts-core PUBLIC PkgConfig::SRT)
+    set(MOQ2TS_SRT_USABLE TRUE)
+elseif(SRT_FOUND AND SRT_GNUTLS_LIB)
     message(STATUS "Linking libsrt-gnutls (${SRT_GNUTLS_LIB}) to match FFmpeg and avoid a duplicate libsrt")
     target_include_directories(moq2ts-core PUBLIC ${SRT_INCLUDE_DIRS})
     target_link_libraries(moq2ts-core PUBLIC ${SRT_GNUTLS_LIB})
