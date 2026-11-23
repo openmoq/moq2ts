@@ -427,7 +427,19 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
             const bool sourceEnded = state->sourceEnded.load(std::memory_order_acquire);
             const bool stillRunning = running.load(std::memory_order_acquire);
             if (!status.ok && stillRunning && !publisherStopped) {
+                // The failed connection's count joins the totals before the
+                // next one starts from 0, as on the success path below. From
+                // moqxr v0.4.21 (keep_session_totals), stats() keeps what the
+                // session sent after a failure. Earlier releases return 0 here,
+                // since each connection has its own Publisher, so the fold adds
+                // nothing and never a stale count. The count moves to
+                // m_sentEnded* in the same locked step that drops
+                // m_activePublisher, so sentSoFar() never counts it twice or
+                // not at all.
+                const auto failedStats = activePublisher->stats();
                 QMutexLocker locker(&m_mutex);
+                m_sentEndedObjects += static_cast<int64_t>(failedStats.objects_published);
+                m_sentEndedBytes += static_cast<int64_t>(failedStats.bytes_published);
                 if (m_activePublisher == activePublisher) {
                     m_activePublisher.reset();
                 }
