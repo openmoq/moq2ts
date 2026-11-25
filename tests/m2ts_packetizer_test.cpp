@@ -377,6 +377,33 @@ int main() {
                              std::to_string(bytes / 188) + " " + warnings().join(" | ").toStdString());
         }
 
+        // As on a normal live source with random access points, a PCR that
+        // steps back starts no Group on time: the Groups stay on the points.
+        {
+            const auto frame = [](bool rap, int cc) {
+                return tb::tsPacket(0x100, true, tb::pesHeaderWithPts(9000), cc, rap ? 0x40 : -1);
+            };
+            QByteArray ts = tables;
+            ts += pcrPacket(0x100, std::int64_t{27000000} * 1000, 0) + frame(true, 1) + frame(false, 2);
+            ts += pcrPacket(0x100, std::int64_t{27000000} * 1001, 2) + frame(true, 3) + frame(false, 4);
+            ts += pcrPacket(0x100, std::int64_t{27000000} * 5, 4) + frame(false, 5) + frame(false, 6);
+            ts += pcrPacket(0x100, std::int64_t{27000000} * 6, 6) + frame(true, 7) + frame(false, 8);
+            M2tsPacketizer packetizer(std::make_shared<SequentialDevice>(ts), QStringLiteral("earlyStep"));
+            packetizer.setTransparent(true);
+            packetizer.setAnnounceEarly(true);
+            QString error;
+            ok &= expect(packetizer.open(0, &error), "early PCR step: opens: " + error.toStdString());
+            std::uint64_t last = 0;
+            M2tsObject object;
+            for (int i = 0; i < 100 && packetizer.readObject(2, &object, &error); ++i) {
+                if (!object.payload.isEmpty()) {
+                    last = object.groupId;
+                }
+            }
+            ok &= expect(last == 2, "early PCR step: one Group per access point, " + std::to_string(last + 1));
+            ok &= expect(!packetizer.randomAccess(), "early PCR step: the catalog declares none");
+        }
+
         // A PCR that advances once and then stops still ends the wait, after
         // 20,000 packets.
         {

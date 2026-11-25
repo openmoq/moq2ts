@@ -1407,7 +1407,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         if (pid == m_rapPid) {
             m_groupPidFlagged = flagged;
         }
-        if (pid == m_pcrPid && (!m_sawFirstRap || !randomAccess())) {
+        if (pid == m_pcrPid && (!m_sawFirstRap || !groupsAtRandomAccess())) {
             const std::int64_t pcr = pcrOf(tsView);
             if (pcr >= 0) {
                 m_lastPcr27 = pcr;
@@ -1420,9 +1420,14 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
             }
         }
         if (m_dropLeadIn && !m_leadInDropped) {
-            if (!startsRandomAccess(pid, tsView) && !(m_announceEarly && leadInBoundReached(tsView))) {
-                --index;
-                continue;
+            if (!startsRandomAccess(pid, tsView)) {
+                if (!m_announceEarly || !leadInBoundReached(tsView)) {
+                    --index;
+                    continue;
+                }
+                // No random access point: as a source whose look-ahead found
+                // none, with Groups on time.
+                m_dropLeadIn = false;
             }
             m_leadInDropped = true;
         }
@@ -1935,15 +1940,14 @@ bool M2tsPacketizer::timedGroupsActive() {
     // that a source with a usual GOP keeps its Groups on its random access
     // points. A track that declares mpeg2tsRandomAccess starts every Group at
     // one (MSFTS "Group Boundaries"), so its timed Groups end at the first.
-    return !m_sawFirstRap || (!randomAccess() && pcrSince(m_lastRapPcr27) >= kRapWindowPcr);
+    return !m_sawFirstRap || (!groupsAtRandomAccess() && pcrSince(m_lastRapPcr27) >= kRapWindowPcr);
 }
 
-bool M2tsPacketizer::randomAccess() const {
+bool M2tsPacketizer::groupsAtRandomAccess() const {
     // SRT recovery can fall back to a packet boundary without a RAP, so an
     // unmodified track with source gaps cannot promise that every Group
     // begins at one. Per-program carriage drops to the next RAP after a gap.
-    // An early announce has not seen that the source has any.
-    return m_dropLeadIn && !m_announceEarly && (!m_sourceGaps || !m_transparent);
+    return m_dropLeadIn && (!m_sourceGaps || !m_transparent);
 }
 
 bool M2tsPacketizer::leadInBoundReached(const QByteArray& tsPacket) {

@@ -217,7 +217,12 @@ public:
     void continueFrom(const M2tsPacketizer& previous);
     // True when the first Object of every Group contains a random access point,
     // which the catalog then declares as mpeg2tsRandomAccess. Valid after open().
-    bool randomAccess() const;
+    // An early announce declares none: it has not seen that the source has
+    // random access points.
+    bool randomAccess() const { return groupsAtRandomAccess() && !m_announceEarly; }
+    // Whether Groups follow the random access points from the first on, so
+    // that timed Groups stay off.
+    bool groupsAtRandomAccess() const;
     // False for an unmodified multiplex opened without a requested program: the
     // catalog then names no reference program (draft "Unmodified Multiplex").
     bool namesProgram() const;
