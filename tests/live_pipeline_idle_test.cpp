@@ -156,7 +156,7 @@ struct Run {
     moq2ts::LivePipeline pipeline;
     int writer = -1;
 
-    bool begin() {
+    bool begin(bool announceEarly = false) {
         const QByteArray path = dir.filePath(QStringLiteral("live.ts")).toLocal8Bit();
         if (::mkfifo(path.constData(), 0600) != 0) {
             return false;
@@ -166,6 +166,7 @@ struct Run {
         cfg.videoSource = QString::fromLocal8Bit(path);
         cfg.transparentMode = true;
         cfg.targetSegmentBytes = 2 * 188;
+        cfg.announceEarly = announceEarly;
         pipeline.start(cfg, &recorder);
         writer = ::open(path.constData(), O_WRONLY);   // waits for the pipeline
         return writer >= 0;
@@ -228,6 +229,19 @@ int main(int argc, char** argv) {
         run.pipeline.requestStop();
         ok &= expect(waitFor([&] { return run.recorder.ended.load(); }), "stop: the source ends");
         ok &= expect(std::chrono::steady_clock::now() - asked < std::chrono::seconds(1), "stop: within 1 s");
+    }
+
+    // Under early announce, an input with no random access point yet publishes
+    // nothing, and says so.
+    {
+        Run run;
+        ok &= expect(run.begin(true), "early: the pipeline reads the FIFO");
+        QByteArray before = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}}));
+        before += tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+        before += tb::tsPacket(0x100, false, QByteArray(184, char(0)), 0);
+        ok &= expect(run.write(before), "early: write the tables and some video");
+        ok &= expect(waitFor([&] { return run.recorder.idles() > 1; }), "early: the source reports nothing yet");
+        ok &= expect(run.recorder.mediaBytes() == 0, "early: nothing is published");
     }
 
     // groupOpened: once per Group of a media track, never for the catalog or a
