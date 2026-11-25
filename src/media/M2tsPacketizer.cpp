@@ -658,7 +658,10 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     // so a multiplex without one keeps its lead-in. The random_access_indicator
     // is optional, so the track declares random access only if one appears.
     const bool multiplex = m_transparent && m_patProgramCount != 1;
-    m_dropLeadIn = !m_announceEarly && m_sequential && (!multiplex || (namesProgram() && m_pcrPid >= 0)) && findRandomAccess();
+    // An early announce reads nothing ahead: it drops the lead-in as it reads,
+    // a multiplex without a reference program too.
+    m_dropLeadIn = m_sequential &&
+                   (m_announceEarly || ((!multiplex || (namesProgram() && m_pcrPid >= 0)) && findRandomAccess()));
     if (!m_startError.isEmpty()) {
         if (error) {
             *error = m_startError;
@@ -1336,6 +1339,12 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
                 break;
             }
         }
+        // While an early announce drops its lead-in, a quiet input gives an
+        // empty Object, so that the caller can serve the relay meanwhile.
+        if (m_announceEarly && m_dropLeadIn && !m_leadInDropped && payload.isEmpty() && inputQuiet(0)) {
+            *object = M2tsObject{};
+            return true;
+        }
         std::uint64_t packetOffset = 0;
         QByteArray packet = nextSourcePacket(&packetOffset);
         if (packet.isEmpty()) {
@@ -1398,7 +1407,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         if (pid == m_rapPid) {
             m_groupPidFlagged = flagged;
         }
-        if (pid == m_pcrPid && (!m_sawFirstRap || !randomAccess())) {
+        if (pid == m_pcrPid && (!m_sawFirstRap || !groupsAtRandomAccess())) {
             const std::int64_t pcr = pcrOf(tsView);
             if (pcr >= 0) {
                 m_lastPcr27 = pcr;
@@ -1412,8 +1421,13 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         }
         if (m_dropLeadIn && !m_leadInDropped) {
             if (!startsRandomAccess(pid, tsView)) {
-                --index;
-                continue;
+                if (!m_announceEarly || !leadInBoundReached(tsView)) {
+                    --index;
+                    continue;
+                }
+                // No random access point: as a source whose look-ahead found
+                // none, with Groups on time.
+                m_dropLeadIn = false;
             }
             m_leadInDropped = true;
         }
@@ -1926,14 +1940,40 @@ bool M2tsPacketizer::timedGroupsActive() {
     // that a source with a usual GOP keeps its Groups on its random access
     // points. A track that declares mpeg2tsRandomAccess starts every Group at
     // one (MSFTS "Group Boundaries"), so its timed Groups end at the first.
-    return !m_sawFirstRap || (!randomAccess() && pcrSince(m_lastRapPcr27) >= kRapWindowPcr);
+    return !m_sawFirstRap || (!groupsAtRandomAccess() && pcrSince(m_lastRapPcr27) >= kRapWindowPcr);
 }
 
-bool M2tsPacketizer::randomAccess() const {
+bool M2tsPacketizer::groupsAtRandomAccess() const {
     // SRT recovery can fall back to a packet boundary without a RAP, so an
     // unmodified track with source gaps cannot promise that every Group
     // begins at one. Per-program carriage drops to the next RAP after a gap.
     return m_dropLeadIn && (!m_sourceGaps || !m_transparent);
+}
+
+bool M2tsPacketizer::leadInBoundReached(const QByteArray& tsPacket) {
+    // As findRandomAccess() bounds its look-ahead: 10 s of PCR time, or a
+    // number of packets where no PCR advances.
+    constexpr std::int64_t pcrRange = (std::int64_t{1} << 33) * 300;
+    ++m_leadInPackets;
+    if (pidOf(tsPacket) == m_pcrPid) {
+        const std::int64_t pcr = pcrOf(tsPacket);
+        if (pcr >= 0) {
+            if (m_leadInPcr >= 0) {
+                const std::int64_t step = (pcr - m_leadInPcr + pcrRange) % pcrRange;
+                m_leadInElapsed += step <= kMaxPcrStep ? step : 0;
+                // Only a step that counts as time holds the packet bound off.
+                m_leadInPackets = step > 0 && step <= kMaxPcrStep ? 0 : m_leadInPackets;
+            }
+            m_leadInPcr = pcr;
+        }
+    }
+    const int maxPackets = m_timedStartWindows ? kTimedWindowMaxPackets : 20000;
+    if (m_leadInElapsed < kRapWindowPcr && m_leadInPackets < maxPackets) {
+        return false;
+    }
+    qWarning("No random_access_indicator within the first %lld s of the live source; the track starts without one.",
+             static_cast<long long>(kRapWindowPcr / kPcrHz));
+    return true;
 }
 
 bool M2tsPacketizer::inputQuiet(int msecs) {

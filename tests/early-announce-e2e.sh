@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # moq2ts-cli --announce-early -> relay -> moq2ts-receiver, the receiver
 # subscribed before media starts. The publisher gets only the packets before
-# the first video packet; once the receiver has the track, the rest follows at
-# the mux rate. The capture must hold every non-null packet of the source.
+# the first random access point; once the receiver has the track, the rest
+# follows at the mux rate. The capture must hold every non-null packet of the
+# source from that point.
 # Exits non-zero otherwise.
 # Requires a relay (a local moq5-relay by default, see e2e-relay.sh), ffmpeg,
 # and python3.
@@ -56,7 +57,9 @@ insecure = ['--insecure'] if env.get('E2E_INSECURE') == 'true' else []
 data = open(f'{work}/source.ts', 'rb').read()
 packets = [data[i:i + 188] for i in range(0, len(data), 188)]
 pid = lambda p: ((p[1] & 0x1F) << 8) | p[2]
-lead = next(i for i, p in enumerate(packets) if pid(p) == 0x100)
+# The first video packet with random_access_indicator.
+lead = next(i for i, p in enumerate(packets)
+            if pid(p) == 0x100 and p[1] & 0x40 and p[3] & 0x20 and p[4] > 0 and p[5] & 0x40)
 
 def follow(stream, log, marker, seen):
     for line in iter(stream.readline, b''):
@@ -126,14 +129,16 @@ publisher.wait(15)
 received = open(f'{work}/received.ts', 'rb').read()
 got = [received[i:i + 188] for i in range(0, len(received), 188)]
 carried = lambda stream: [p for p in stream if pid(p) != 0x1FFF]
-if carried(got) != carried(packets):
-    fail(f'the capture holds {len(carried(got))} of {len(carried(packets))} non-null packets, or others')
+expected = carried(packets[lead:])
+if carried(got) != expected:
+    fail(f'the capture holds {len(carried(got))} of {len(expected)} non-null packets, or others')
 objects = [line.split() for line in open(f'{work}/objects.txt')]
 if sum(int(o[2]) for o in objects) != len(received):
     fail('the object log does not add up to the capture')
 groups = [int(o[0]) for o in objects]
 if groups != sorted(groups):
     fail('the object log has a Group ID that goes back')
-print(f'OK: draft {env["DRAFT"]}: all {len(carried(packets))} non-null packets, subscribed before media')
+print(f'OK: draft {env["DRAFT"]}: all {len(expected)} non-null packets from the first access point, '
+      'subscribed before media')
 PY
 ok=1

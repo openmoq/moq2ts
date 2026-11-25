@@ -539,6 +539,12 @@ void LivePipeline::runLoop() {
                 // m_running.
                 return m_running.load(std::memory_order_acquire) ? endBroadcast(st.get()) : std::nullopt;
             }
+            // Nothing to publish yet: see M2tsPacketizer::setAnnounceEarly.
+            if (object.payload.isEmpty()) {
+                PublishedObject nothingYet;
+                nothingYet.idle = true;
+                return nothingYet;
+            }
             if (m_config.resyncPid) {
                 m_config.resyncPid->store(st->packetizer->groupPid(), std::memory_order_relaxed);
             }

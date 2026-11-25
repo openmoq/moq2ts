@@ -282,9 +282,10 @@ int main() {
         ok &= expect(!three.randomAccess, "early: random access is not declared");
         ok &= expect(three.initData, "early: the catalog has initData");
         ok &= expect(three.muxRate == 0, "early: no rate is measured");
-        ok &= expect(three.bytes == sdt.size() + tables.size() + media.size(), "early: no packet is dropped");
-        ok &= expect(!three.groups.isEmpty() && three.groups.count(0) == three.groups.size(),
-                     "early: packets before the first random access point stay in Group 0");
+        // Only the random access point is published: not the tables, nor the
+        // video before it.
+        ok &= expect(three.bytes == 188 && three.groups == QList<std::uint64_t>({0}),
+                     "early: Group 0 starts at the first random access point");
         const EarlyOpen two = openEarly(dir.filePath("early2"), tables, 2000ms);
         ok &= expect(two.returned && two.opened, "early: PAT and PMT alone open the source");
         // A multiplex whose first PMT has not come: no track without tables.
@@ -293,6 +294,157 @@ int main() {
                                              tb::psiPacket(0x1001, tb::pmtSection(2, 0x200, {{0x1B, 0x200}})),
                                          500ms);
         ok &= expect(!late.returned, "early: open waits for the first program's PMT");
+
+        // Without a random access point yet, a quiet input gives no packets,
+        // and readObject comes back to say so.
+        {
+            const QByteArray fifo = dir.filePath("earlyQuiet").toLocal8Bit();
+            ::mkfifo(fifo.constData(), 0600);
+            int fd = -1;
+            const QByteArray data = sdt + tables + tb::tsPacket(0x100, false, QByteArray(184, char(0)), 0);
+            std::thread writer([&] {
+                fd = ::open(fifo.constData(), O_WRONLY);
+                if (fd >= 0 && ::write(fd, data.constData(), data.size()) != data.size()) {
+                    std::cerr << "short FIFO write\n";
+                }
+            });
+            M2tsPacketizer packetizer(QString::fromLocal8Bit(fifo));
+            packetizer.setTransparent(true);
+            packetizer.setAnnounceEarly(true);
+            QString error;
+            const bool opened = packetizer.open(0, &error);
+            writer.join();
+            M2tsObject object;
+            auto read = std::async(std::launch::async,
+                                   [&] { return opened && packetizer.readObject(4, &object, &error); });
+            const bool returned = read.wait_for(1000ms) == std::future_status::ready;
+            ::close(fd);
+            const bool gave = read.get();
+            ok &= expect(returned && gave && object.payload.isEmpty(), "early quiet: no packet, and back at once");
+        }
+
+        // A multiplex without a reference program drops its lead-in too, up to
+        // the first program's random access point. Without early announce it
+        // keeps it.
+        {
+            const QByteArray muxTables = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}})) +
+                                         tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}})) +
+                                         tb::psiPacket(0x1001, tb::pmtSection(2, 0x200, {{0x1B, 0x200}}));
+            const QByteArray rap = tb::tsPacket(0x100, true, tb::pesHeaderWithPts(9000), 1, 0x40);
+            const QByteArray other = tb::tsPacket(0x200, false, QByteArray(184, char(0)), 0);
+            const QByteArray ts = muxTables + other + rap + other;
+            for (const bool early : {true, false}) {
+                M2tsPacketizer packetizer(std::make_shared<SequentialDevice>(ts), QStringLiteral("earlyMux"));
+                packetizer.setTransparent(true);
+                packetizer.setAnnounceEarly(early);
+                QString error;
+                ok &= expect(packetizer.open(0, &error), "early multiplex: opens: " + error.toStdString());
+                QByteArray out;
+                M2tsObject object;
+                while (packetizer.readObject(8, &object, &error)) {
+                    out += object.payload;
+                }
+                ok &= expect(out == (early ? rap + other : ts),
+                             early ? "early multiplex: starts at the first program's access point"
+                                   : "multiplex without early announce: keeps its lead-in");
+            }
+        }
+
+        // A source with no random_access_indicator publishes after 10 s of PCR
+        // time rather than staying silent.
+        {
+            QByteArray ts = tables;
+            for (int index = 0; index < 120; ++index) {   // 100 ms apart
+                ts += pcrPacket(0x100, static_cast<std::int64_t>(index) * 2700000, index % 16);
+            }
+            M2tsPacketizer packetizer(std::make_shared<SequentialDevice>(ts), QStringLiteral("earlyNoRap"));
+            packetizer.setTransparent(true);
+            packetizer.setAnnounceEarly(true);
+            QString error;
+            ok &= expect(packetizer.open(0, &error), "early no access point: opens: " + error.toStdString());
+            warnings().clear();
+            qInstallMessageHandler(captureWarning);
+            qsizetype bytes = 0;
+            M2tsObject object;
+            // The first reads of a source that has run out give nothing.
+            for (int i = 0; i < 100 && packetizer.readObject(8, &object, &error); ++i) {
+                bytes += object.payload.size();
+            }
+            qInstallMessageHandler(nullptr);
+            const QStringList bound = warnings().filter(QStringLiteral("random_access_indicator within"));
+            ok &= expect(bytes >= 18 * 188 && bytes <= 20 * 188 && bound.size() == 1,
+                         "early no access point: publishes after 10 s, and warns once: " +
+                             std::to_string(bytes / 188) + " " + warnings().join(" | ").toStdString());
+        }
+
+        // As on a normal live source with random access points, a PCR that
+        // steps back starts no Group on time: the Groups stay on the points.
+        {
+            const auto frame = [](bool rap, int cc) {
+                return tb::tsPacket(0x100, true, tb::pesHeaderWithPts(9000), cc, rap ? 0x40 : -1);
+            };
+            QByteArray ts = tables;
+            ts += pcrPacket(0x100, std::int64_t{27000000} * 1000, 0) + frame(true, 1) + frame(false, 2);
+            ts += pcrPacket(0x100, std::int64_t{27000000} * 1001, 2) + frame(true, 3) + frame(false, 4);
+            ts += pcrPacket(0x100, std::int64_t{27000000} * 5, 4) + frame(false, 5) + frame(false, 6);
+            ts += pcrPacket(0x100, std::int64_t{27000000} * 6, 6) + frame(true, 7) + frame(false, 8);
+            M2tsPacketizer packetizer(std::make_shared<SequentialDevice>(ts), QStringLiteral("earlyStep"));
+            packetizer.setTransparent(true);
+            packetizer.setAnnounceEarly(true);
+            QString error;
+            ok &= expect(packetizer.open(0, &error), "early PCR step: opens: " + error.toStdString());
+            std::uint64_t last = 0;
+            M2tsObject object;
+            for (int i = 0; i < 100 && packetizer.readObject(2, &object, &error); ++i) {
+                if (!object.payload.isEmpty()) {
+                    last = object.groupId;
+                }
+            }
+            ok &= expect(last == 2, "early PCR step: one Group per access point, " + std::to_string(last + 1));
+            ok &= expect(!packetizer.randomAccess(), "early PCR step: the catalog declares none");
+        }
+
+        // A PCR that advances once and then stops still ends the wait, after
+        // 20,000 packets.
+        {
+            QByteArray ts = tables + pcrPacket(0x100, 0, 0) + pcrPacket(0x100, 2700000, 1);
+            for (int index = 0; index < 20100; ++index) {
+                ts += tb::tsPacket(0x100, false, QByteArray(184, char(0)), index % 16);
+            }
+            M2tsPacketizer packetizer(std::make_shared<SequentialDevice>(ts), QStringLiteral("earlyFrozen"));
+            packetizer.setTransparent(true);
+            packetizer.setAnnounceEarly(true);
+            QString error;
+            ok &= expect(packetizer.open(0, &error), "early frozen PCR: opens: " + error.toStdString());
+            qsizetype bytes = 0;
+            M2tsObject object;
+            for (int i = 0; i < 100 && packetizer.readObject(8, &object, &error); ++i) {
+                bytes += object.payload.size();
+            }
+            ok &= expect(bytes > 0, "early frozen PCR: publishes after the packet bound");
+        }
+
+        // PCRs further apart than a step that counts as time do not hold the
+        // packet bound off.
+        {
+            QByteArray ts = tables;
+            for (int index = 0; index < 20100; ++index) {
+                ts += index % 1000 == 0
+                          ? pcrPacket(0x100, std::int64_t{27000000} * 3 / 2 * (index / 1000), index % 16)
+                          : tb::tsPacket(0x100, false, QByteArray(184, char(0)), index % 16);
+            }
+            M2tsPacketizer packetizer(std::make_shared<SequentialDevice>(ts), QStringLiteral("earlySparse"));
+            packetizer.setTransparent(true);
+            packetizer.setAnnounceEarly(true);
+            QString error;
+            ok &= expect(packetizer.open(0, &error), "early sparse PCR: opens: " + error.toStdString());
+            qsizetype bytes = 0;
+            M2tsObject object;
+            for (int i = 0; i < 100 && packetizer.readObject(8, &object, &error); ++i) {
+                bytes += object.payload.size();
+            }
+            ok &= expect(bytes > 0, "early sparse PCR: publishes after the packet bound");
+        }
     }
 
     const QString spts = dir.filePath("spts.ts");

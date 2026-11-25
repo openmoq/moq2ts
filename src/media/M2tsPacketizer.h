@@ -143,8 +143,10 @@ public:
     // preserve the historical filtered single-program behavior.
     void setTransparent(bool transparent);      // unmodified carriage: forward every packet
     // Opens a live source from its PAT and PMT alone, without reading ahead
-    // for rates or random access points: randomAccess() stays false and no
-    // lead-in is dropped. Set before open().
+    // for rates or random access points: randomAccess() stays false. The
+    // lead-in is dropped as it is read, and readObject() returns true with an
+    // empty payload while the input is quiet before the first point. Set
+    // before open().
     void setAnnounceEarly(bool early) { m_announceEarly = early; }
     void setRetainSiTables(bool retain);         // all SI tables; setSiTables(allSiTables())
     void setSiTables(QSet<SiTable> tables);      // keep these SI tables beside the program
@@ -215,7 +217,12 @@ public:
     void continueFrom(const M2tsPacketizer& previous);
     // True when the first Object of every Group contains a random access point,
     // which the catalog then declares as mpeg2tsRandomAccess. Valid after open().
-    bool randomAccess() const;
+    // An early announce declares none: it has not seen that the source has
+    // random access points.
+    bool randomAccess() const { return groupsAtRandomAccess() && !m_announceEarly; }
+    // Whether Groups follow the random access points from the first on, so
+    // that timed Groups stay off.
+    bool groupsAtRandomAccess() const;
     // False for an unmodified multiplex opened without a requested program: the
     // catalog then names no reference program (draft "Unmodified Multiplex").
     bool namesProgram() const;
@@ -282,6 +289,8 @@ private:
     // marks the PCR discontinuity when a published Group precedes the gap
     // (discontinuity), as MSFTS 5.4 asks between consecutive Groups only.
     void restartAfterGap(bool discontinuity);
+    // Whether the early lead-in has run past its bound with this packet.
+    bool leadInBoundReached(const QByteArray& tsPacket);
     // Per-program carriage: the rewriter of a table PID other than the PAT,
     // or nullptr, and the decision for each of its sections.
     SectionRewriter* rewriterFor(int pid);
@@ -371,6 +380,11 @@ private:
     // A live track drops the packets before its first random access point.
     bool m_dropLeadIn = false;
     bool m_leadInDropped = false;
+    // The early lead-in dropped so far: its PCR time, and the packets since
+    // the PCR last advanced.
+    int m_leadInPackets = 0;
+    std::int64_t m_leadInPcr = -1;
+    std::int64_t m_leadInElapsed = 0;
     std::bitset<8192> m_selectedPids;   // PIDs are 13 bits
     QByteArray m_initData;
     std::uint64_t m_nextObjectId = 0;
