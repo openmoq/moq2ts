@@ -418,6 +418,9 @@ int main(int argc, char** argv) {
                        "unmodified-program for a single-program source and unmodified-multiplex "
                        "otherwise. --transparent and --publish-multiplex are aliases; SRT ingest "
                        "uses this carriage by default.")));
+    parser.addOption(QCommandLineOption(QStringLiteral("announce-early"),
+        QStringLiteral("With --unmodified: publish the catalog as soon as the PAT and PMT arrive, without "
+                       "waiting for media. The catalog then does not declare random access.")));
     parser.addOption(QCommandLineOption(QStringLiteral("paced"),
         QStringLiteral("Pace file-source publishing at media-time rate (prevents dumping all data at wire speed).")));
     addValue(QStringLiteral("draft"), QStringLiteral("MOQT transport draft version: 14, 16, 17, 18, 21 or 22. The relay must list it."),
@@ -519,6 +522,7 @@ int main(int argc, char** argv) {
     cfg.mpeg2tsMuxRateBps = parser.value(QStringLiteral("mux-rate")).toInt();
     cfg.transparentMode = parser.isSet(QStringLiteral("unmodified"));
     cfg.pacedFileSource = parser.isSet(QStringLiteral("paced"));
+    cfg.announceEarly = parser.isSet(QStringLiteral("announce-early"));
     cfg.draftVersion = parser.value(QStringLiteral("draft")).toInt();
     cfg.insecure = parser.isSet(QStringLiteral("insecure"));
     cfg.reconnect = !parser.isSet(QStringLiteral("no-reconnect"));
@@ -700,6 +704,15 @@ int main(int argc, char** argv) {
         cfg.transparentMode = true;
     }
 #endif  // MOQ2TS_HAS_SRT
+
+    if (cfg.announceEarly && useSrt) {
+        logLine(stderr, "error", QStringLiteral("--announce-early cannot be combined with SRT ingest."));
+        return 2;
+    }
+    if (cfg.announceEarly && !cfg.transparentMode) {
+        logLine(stderr, "error", QStringLiteral("--announce-early needs --unmodified."));
+        return 2;
+    }
 
     // Validation mirrors the GUI guards.
     const bool hasSource = useSrt || !cfg.videoSource.isEmpty() || !cfg.audioSource.isEmpty() ||

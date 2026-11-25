@@ -142,6 +142,10 @@ public:
     // MSFTS carriage-profile knobs (msfts#7). Call before open(); defaults
     // preserve the historical filtered single-program behavior.
     void setTransparent(bool transparent);      // unmodified carriage: forward every packet
+    // Opens a live source from its PAT and PMT alone, without reading ahead
+    // for rates or random access points: randomAccess() stays false and no
+    // lead-in is dropped. Set before open().
+    void setAnnounceEarly(bool early) { m_announceEarly = early; }
     void setRetainSiTables(bool retain);         // all SI tables; setSiTables(allSiTables())
     void setSiTables(QSet<SiTable> tables);      // keep these SI tables beside the program
     void setRetainNullPackets(bool retain);      // keep null (0x1FFF) packets
@@ -355,6 +359,7 @@ private:
     // The catalog declares initRef only if initData existed at open(); MSF
     // Section 5.3 does not let a later catalog add it to the track.
     bool m_initDataDeclared = false;
+    bool m_announceEarly = false;
     qint64 m_measuredMuxRate = 0;
     QString m_muxRateNote;
     qint64 m_measuredBitrate = 0;

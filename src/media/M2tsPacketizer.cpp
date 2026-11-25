@@ -630,7 +630,9 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     // publisher that removes null packets SHOULD declare the rate; for a
     // single-program source it is the nominal mux rate of the source, which
     // the PCR gives.
-    measureRates(!m_transparent && !m_retainNullPackets && m_patProgramCount == 1);
+    if (!m_announceEarly) {
+        measureRates(!m_transparent && !m_retainNullPackets && m_patProgramCount == 1);
+    }
     if (!m_startError.isEmpty()) {
         if (error) {
             *error = m_startError;
@@ -656,7 +658,7 @@ bool M2tsPacketizer::open(int requestedProgramNumber, QString* error) {
     // so a multiplex without one keeps its lead-in. The random_access_indicator
     // is optional, so the track declares random access only if one appears.
     const bool multiplex = m_transparent && m_patProgramCount != 1;
-    m_dropLeadIn = m_sequential && (!multiplex || (namesProgram() && m_pcrPid >= 0)) && findRandomAccess();
+    m_dropLeadIn = !m_announceEarly && m_sequential && (!multiplex || (namesProgram() && m_pcrPid >= 0)) && findRandomAccess();
     if (!m_startError.isEmpty()) {
         if (error) {
             *error = m_startError;
@@ -691,7 +693,9 @@ int detectTsPacketSize(const QByteArray& probe) {
 }
 
 bool M2tsPacketizer::detectPacketSize(QString* error) {
-    const QByteArray probe = m_device->peek(192 * 4);
+    // peek() waits for what it is asked on a pipe. Two source packets tell the
+    // size, and the tables an early announce has may be no more than that.
+    const QByteArray probe = m_device->peek(m_announceEarly ? 188 * 2 : 192 * 4);
     if (probe.size() < 188) {
         if (error) {
             *error = QStringLiteral("Input is too small to contain a TS packet.");
