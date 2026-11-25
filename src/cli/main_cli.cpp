@@ -421,6 +421,10 @@ int main(int argc, char** argv) {
     parser.addOption(QCommandLineOption(QStringLiteral("announce-early"),
         QStringLiteral("With --unmodified: publish the catalog as soon as the PAT and PMT arrive, without "
                        "waiting for media. The catalog then does not declare random access.")));
+    addValue(QStringLiteral("initial-group-id"),
+             QStringLiteral("The Group ID of the first Group of the media track, from 0 to 2^62 - 1: a publisher "
+                            "that takes over from another starts above its Groups."),
+             QStringLiteral("id"), QStringLiteral("0"));
     parser.addOption(QCommandLineOption(QStringLiteral("log-groups"),
         QStringLiteral("Print a [group] line for each Group of a media track.")));
     parser.addOption(QCommandLineOption(QStringLiteral("paced"),
@@ -529,6 +533,15 @@ int main(int argc, char** argv) {
     cfg.transparentMode = parser.isSet(QStringLiteral("unmodified"));
     cfg.pacedFileSource = parser.isSet(QStringLiteral("paced"));
     cfg.announceEarly = parser.isSet(QStringLiteral("announce-early"));
+    {
+        bool idOk = false;
+        const qulonglong id = parser.value(QStringLiteral("initial-group-id")).toULongLong(&idOk);
+        if (!idOk || id > (1ULL << 62) - 1) {
+            logLine(stderr, "error", QStringLiteral("--initial-group-id must be an integer from 0 to 2^62 - 1."));
+            return 2;
+        }
+        cfg.initialGroupId = id;
+    }
     cfg.draftVersion = parser.value(QStringLiteral("draft")).toInt();
     cfg.insecure = parser.isSet(QStringLiteral("insecure"));
     cfg.reconnect = !parser.isSet(QStringLiteral("no-reconnect"));
@@ -726,6 +739,12 @@ int main(int argc, char** argv) {
     }
     if (cfg.announceEarly && !cfg.transparentMode) {
         logLine(stderr, "error", QStringLiteral("--announce-early needs --unmodified."));
+        return 2;
+    }
+
+    // The capture path numbers its own Groups.
+    if (cfg.initialGroupId != 0 && (!cfg.cameraDeviceId.isEmpty() || !cfg.microphoneDeviceId.isEmpty())) {
+        logLine(stderr, "error", QStringLiteral("--initial-group-id cannot be combined with --camera or --mic."));
         return 2;
     }
 

@@ -79,6 +79,17 @@ public:
         }
         return media;
     }
+    // The payload of the latest media timeline Object.
+    QByteArray timeline() const {
+        std::lock_guard lock(m_mutex);
+        QByteArray latest;
+        for (const PublishedObject& object : m_objects) {
+            if (object.trackName == QStringLiteral("program-1.timeline")) {
+                latest = object.payload;
+            }
+        }
+        return latest;
+    }
     qsizetype mediaBytes() const {
         qsizetype bytes = 0;
         for (const PublishedObject& object : media()) {
@@ -156,7 +167,7 @@ struct Run {
     moq2ts::LivePipeline pipeline;
     int writer = -1;
 
-    bool begin(bool announceEarly = false) {
+    bool begin(bool announceEarly = false, std::uint64_t initialGroupId = 0) {
         const QByteArray path = dir.filePath(QStringLiteral("live.ts")).toLocal8Bit();
         if (::mkfifo(path.constData(), 0600) != 0) {
             return false;
@@ -167,6 +178,7 @@ struct Run {
         cfg.transparentMode = true;
         cfg.targetSegmentBytes = 2 * 188;
         cfg.announceEarly = announceEarly;
+        cfg.initialGroupId = initialGroupId;
         pipeline.start(cfg, &recorder);
         writer = ::open(path.constData(), O_WRONLY);   // waits for the pipeline
         return writer >= 0;
@@ -242,6 +254,18 @@ int main(int argc, char** argv) {
         ok &= expect(run.write(before), "early: write the tables and some video");
         ok &= expect(waitFor([&] { return run.recorder.idles() > 1; }), "early: the source reports nothing yet");
         ok &= expect(run.recorder.mediaBytes() == 0, "early: nothing is published");
+    }
+
+    // The media timeline names the same Group IDs as the media.
+    {
+        Run run;
+        ok &= expect(run.begin(false, 100), "initial Group ID: the pipeline reads the FIFO");
+        ok &= expect(run.write(start()), "initial Group ID: write");
+        ok &= expect(waitFor([&] { return run.recorder.idles() > 0; }), "initial Group ID: read");
+        const auto media = run.recorder.media();
+        ok &= expect(!media.empty() && media.front().groupId == 100, "initial Group ID: media starts at Group 100");
+        ok &= expect(run.recorder.timeline().contains("[100,0]"),
+                     "initial Group ID: the timeline records Group 100: " + run.recorder.timeline().toStdString());
     }
 
     // groupOpened: once per Group of a media track, never for the catalog or a
