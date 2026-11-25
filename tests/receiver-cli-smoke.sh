@@ -51,3 +51,25 @@ for value in 0 500 600000; do
     exit 1
   fi
 done
+# --object-log and --subscribe-after, for the stream checks.
+"$binary" --help 2>&1 | grep -q -- '--object-log'
+"$binary" --help 2>&1 | grep -q -- '--subscribe-after'
+for value in -1 abc '' 3601 8x nan; do
+  if [ "$(usage_status --url moqt://127.0.0.1:9 --subscribe-after "$value")" -ne 2 ]; then
+    echo "--subscribe-after '$value' was not refused as a usage error" >&2
+    exit 1
+  fi
+done
+for value in 0 8.5 3600; do
+  if [ "$(usage_status --url moqt://127.0.0.1:9 --subscribe-after "$value")" -eq 2 ]; then
+    echo "--subscribe-after $value was refused as a usage error" >&2
+    exit 1
+  fi
+done
+log_error="$(timeout 20 "$binary" --url moqt://127.0.0.1:9 --namespace live/ok --out /tmp/unused.ts \
+  --duration 1 --object-log /nonexistent-dir/objects.txt 2>&1)" && rc=0 || rc=$?
+if [ "$rc" -ne 1 ] || ! printf '%s' "$log_error" | grep -q 'object log' ||
+   printf '%s' "$log_error" | grep -q 'catalog'; then
+  echo "an object log that cannot be opened did not end the receiver before it connected: $log_error" >&2
+  exit 1
+fi

@@ -427,6 +427,13 @@ packets to stdout. `--duration SECONDS` stops a live capture, and `--fail-on-gap
 returns failure when MOQT loss or packet validation errors are reported.
 `https://` URLs use WebTransport when the installed moq5 has that backend.
 
+`--object-log FILE` writes one line, `<group> <object> <bytes>`, for each Object
+written to `--out`, in write order. `--subscribe-after SECONDS` (0 to 3600,
+decimals allowed) holds the track subscription until that long after the process
+started; the catalog is read at once. The receiver prints `[rx] subscribe sent`
+when it asks for the track and `[rx] subscription active` once the track is
+delivering.
+
 When a track ends with a PUBLISH_DONE, for example because the relay dropped a
 publisher that died, the receiver waits for the data streams the message counts.
 `--done-wait MS` bounds that wait: 2000 ms by default, up to 600000, and `0`

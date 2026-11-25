@@ -93,15 +93,15 @@ if not ready.wait(15):
 
 receiver = subprocess.Popen(
     [env['MOQ2TS_RECEIVER'], '--url', env['RELAY_URL'], '--namespace', env['NAMESPACE'], '--draft', env['DRAFT'],
-     '--out', f'{work}/received.ts', '--duration', str(int(env['SOURCE_SECONDS']) + 40)] + insecure,
+     '--out', f'{work}/received.ts', '--object-log', f'{work}/objects.txt', '--duration', str(int(env['SOURCE_SECONDS']) + 40)] + insecure,
     stderr=subprocess.PIPE)
 processes.append(receiver)
 subscribed = threading.Event()
 follower = threading.Thread(target=follow, daemon=True,
-                            args=(receiver.stderr, open(f'{work}/receiver.log', 'wb'), b'[rx] draft=', subscribed))
+                            args=(receiver.stderr, open(f'{work}/receiver.log', 'wb'), b'[rx] subscription active', subscribed))
 follower.start()
 if not subscribed.wait(15):
-    fail('the receiver did not get the catalog while no media had arrived')
+    fail('the subscription was not active while no media had arrived')
 time.sleep(1)
 
 start, sent = time.monotonic(), 0
@@ -128,6 +128,12 @@ got = [received[i:i + 188] for i in range(0, len(received), 188)]
 carried = lambda stream: [p for p in stream if pid(p) != 0x1FFF]
 if carried(got) != carried(packets):
     fail(f'the capture holds {len(carried(got))} of {len(carried(packets))} non-null packets, or others')
+objects = [line.split() for line in open(f'{work}/objects.txt')]
+if sum(int(o[2]) for o in objects) != len(received):
+    fail('the object log does not add up to the capture')
+groups = [int(o[0]) for o in objects]
+if groups != sorted(groups):
+    fail('the object log has a Group ID that goes back')
 print(f'OK: draft {env["DRAFT"]}: all {len(carried(packets))} non-null packets, subscribed before media')
 PY
 ok=1
