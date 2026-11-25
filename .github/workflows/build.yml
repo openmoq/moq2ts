@@ -31,7 +31,9 @@ env:
 jobs:
   linux:
     name: linux (x86_64)
-    runs-on: ubuntu-latest
+    # The AppImages need the build host's glibc or newer, so this image sets the
+    # oldest distribution they run on.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
@@ -298,7 +300,7 @@ jobs:
   release:
     name: release
     needs: [linux, macos, windows]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Windows is optional (see its job): a skipped Windows build still releases.
     if: >-
       ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v')

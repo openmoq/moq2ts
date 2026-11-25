@@ -362,7 +362,7 @@ int main(int argc, char** argv) {
     qRegisterMetaType<int64_t>("int64_t");
     QCoreApplication::setOrganizationName(QStringLiteral("moq2ts"));
     QCoreApplication::setApplicationName(QStringLiteral("moq2ts-cli"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(MOQ2TS_VERSION));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(
