@@ -4,11 +4,19 @@ Last updated: 2026-11-25. Update this file when work stops.
 
 ## Resume here
 
-1. `git switch feat/interop-client` (local, not pushed; holds this file and the next plan).
-2. Next work: `docs/superpowers/plans/2026-11-25-interop-client-image.md`, Task 1.
-   The plan is written and **not yet reviewed or approved**; choose an execution
-   method (the last two plans ran native: one session, one reviewer per branch).
-3. Check the waiting items below first; they can change the plan.
+1. `git switch feat/interop-client` (local, not pushed).
+2. Executing `docs/superpowers/plans/2026-11-25-interop-client-image.md` natively.
+   Tasks 1 to 5 are done and committed; Task 6 (the image) is built and verified
+   but waits on a decision.
+3. **Decision needed:** the runner gives a client 120 s. A full run in the image
+   takes 112 to 114 s in sequence on a draft-22 relay, about 139 s on a relay
+   that only speaks draft 18, and 27 s with the five scenarios run at once (all
+   passed, three rounds, one local relay).
+4. Then Task 7 (WebTransport), Task 8 (CI publish; needs a PR), Task 9 (runner
+   entry; ask first), and one review of the whole branch.
+
+Verified through the client on a loopback `moq-relay` with the runner's checker:
+all five scenarios, drafts 22 and 18; restart recovery 1.9 s.
 
 ## Waiting on others
 

@@ -1,0 +1,7 @@
+# Only what interop/Dockerfile copies.
+*
+!CMakeLists.txt
+!cmake
+!src
+!tests
+!interop
