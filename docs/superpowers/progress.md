@@ -6,17 +6,19 @@ Last updated: 2026-11-25. Update this file when work stops.
 
 1. `git switch feat/interop-client` (local, not pushed).
 2. Executing `docs/superpowers/plans/2026-11-25-interop-client-image.md` natively.
-   Tasks 1 to 5 are done and committed; Task 6 (the image) is built and verified
-   but waits on a decision.
-3. **Decision needed:** the runner gives a client 120 s. A full run in the image
-   takes 112 to 114 s in sequence on a draft-22 relay, about 139 s on a relay
-   that only speaks draft 18, and 27 s with the five scenarios run at once (all
-   passed, three rounds, one local relay).
-4. Then Task 7 (WebTransport), Task 8 (CI publish; needs a PR), Task 9 (runner
+   Tasks 1 to 6 are built; Tasks 1 to 5 and the image are committed.
+3. **Uncommitted in the working tree:** the decided change for the 120 s limit
+   (run the five scenarios at once; `MEDIA_SEQUENTIAL=1` for one at a time).
+   Full run in the image 24 to 26 s.
+4. **Open, investigate before committing it:** intermittent tail loss. 3 of 19
+   concurrent full runs on draft 18 ended 2 to 3 objects short (clock step twice,
+   restart's second part once), with no gap or drop reported and all objects
+   written by the publisher. The failing receiver had "track ended" and the
+   catalog removal pending together. Not yet isolated: publisher closing early,
+   the relay, or moq5's receiver. Next step: relay-side logging of what it
+   received and the PUBLISH_DONE stream count.
+5. Then Task 7 (WebTransport), Task 8 (CI publish; needs a PR), Task 9 (runner
    entry; ask first), and one review of the whole branch.
-
-Verified through the client on a loopback `moq-relay` with the runner's checker:
-all five scenarios, drafts 22 and 18; restart recovery 1.9 s.
 
 ## Waiting on others
 
