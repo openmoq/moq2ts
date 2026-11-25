@@ -12,6 +12,12 @@
 #include <string.h>
 #include <time.h>
 
+/* How long an ended subscription is held for the data streams PUBLISH_DONE
+ * counts. moq5's own default is 30 s, which a live capture spends waiting
+ * before it can follow a restarted publisher. */
+#define DEFAULT_DONE_WAIT_MS 2000
+#define MAX_DONE_WAIT_MS 600000
+
 static volatile sig_atomic_t stopping;
 
 static void on_signal(int signum) {
@@ -27,6 +33,7 @@ typedef struct options {
     const char *stats_path;
     unsigned duration;
     unsigned draft;   /* 22 (the default) or 18 */
+    unsigned done_wait_ms;   /* 0 keeps moq5's default */
     bool insecure;
     bool fail_on_gap;
 } options_t;
@@ -40,7 +47,9 @@ typedef struct candidate {
 static void usage(FILE *out) {
     fputs("moq2ts-receiver --url moqt://host:port --namespace live/name --out capture.ts\n"
           "  [--track NAME] [--stats-json FILE] [--duration SECONDS] [--draft 22|18]\n"
-          "  [--insecure] [--fail-on-gap]\n"
+          "  [--insecure] [--fail-on-gap] [--done-wait MS]\n"
+          "  --done-wait bounds the wait for the last data of an ended track (moqt://\n"
+          "  only; default 2000 ms, 0 keeps moq5's 30 s).\n"
           "  https:// URLs use WebTransport when moq5 was built with that backend.\n"
           "  Stats go to stderr; --out - sends source packets to stdout.\n", out);
 }
@@ -48,6 +57,7 @@ static void usage(FILE *out) {
 static bool parse_options(int argc, char **argv, options_t *o) {
     memset(o, 0, sizeof(*o));
     o->draft = 22;
+    bool done_wait_set = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             usage(stdout);
@@ -71,6 +81,13 @@ static bool parse_options(int argc, char **argv, options_t *o) {
             if (!strcmp(draft, "22")) o->draft = 22;
             else if (!strcmp(draft, "18")) o->draft = 18;
             else return false;
+        } else if (i + 1 < argc && !strcmp(argv[i], "--done-wait")) {
+            const char *value = argv[++i];
+            char *end = NULL;
+            unsigned long n = strtoul(value, &end, 10);
+            if (value[0] < '0' || value[0] > '9' || *end || n > MAX_DONE_WAIT_MS) return false;
+            o->done_wait_ms = (unsigned)n;
+            done_wait_set = true;
         } else if (i + 1 < argc && !strcmp(argv[i], "--duration")) {
             char *end = NULL;
             unsigned long n = strtoul(argv[++i], &end, 10);
@@ -82,7 +99,11 @@ static bool parse_options(int argc, char **argv, options_t *o) {
     }
     if (!o->url || !o->namespace_name || !o->out_path || !o->url[0] ||
         !o->namespace_name[0] || !o->out_path[0]) return false;
-    if (strncmp(o->url, "moqt://", 7) && strncmp(o->url, "https://", 8)) return false;
+    const bool raw_quic = !strncmp(o->url, "moqt://", 7);
+    if (!raw_quic && strncmp(o->url, "https://", 8)) return false;
+    /* moq5 applies the wait to raw QUIC only and refuses it elsewhere. */
+    if (done_wait_set && !raw_quic) return false;
+    if (!done_wait_set && raw_quic) o->done_wait_ms = DEFAULT_DONE_WAIT_MS;
     return true;
 }
 
@@ -196,6 +217,7 @@ int main(int argc, char **argv) {
     ec.url.len = strlen(opt.url);
     ec.backend = MOQ_TRANSPORT_BACKEND_AUTO;
     ec.insecure_skip_verify = opt.insecure;
+    ec.done_wait_timeout_us = (uint64_t)opt.done_wait_ms * 1000;
     const moq_version_t draft = opt.draft == 18 ? MOQ_VERSION_DRAFT_18 : MOQ_VERSION_DRAFT_22;
     ec.versions.struct_size = sizeof(ec.versions);
     ec.versions.policy = MOQ_VERSION_POLICY_EXACT;
