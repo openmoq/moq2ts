@@ -1961,7 +1961,8 @@ bool M2tsPacketizer::leadInBoundReached(const QByteArray& tsPacket) {
             if (m_leadInPcr >= 0) {
                 const std::int64_t step = (pcr - m_leadInPcr + pcrRange) % pcrRange;
                 m_leadInElapsed += step <= kMaxPcrStep ? step : 0;
-                m_leadInPackets = step > 0 ? 0 : m_leadInPackets;
+                // Only a step that counts as time holds the packet bound off.
+                m_leadInPackets = step > 0 && step <= kMaxPcrStep ? 0 : m_leadInPackets;
             }
             m_leadInPcr = pcr;
         }

@@ -423,6 +423,28 @@ int main() {
             }
             ok &= expect(bytes > 0, "early frozen PCR: publishes after the packet bound");
         }
+
+        // PCRs further apart than a step that counts as time do not hold the
+        // packet bound off.
+        {
+            QByteArray ts = tables;
+            for (int index = 0; index < 20100; ++index) {
+                ts += index % 1000 == 0
+                          ? pcrPacket(0x100, std::int64_t{27000000} * 3 / 2 * (index / 1000), index % 16)
+                          : tb::tsPacket(0x100, false, QByteArray(184, char(0)), index % 16);
+            }
+            M2tsPacketizer packetizer(std::make_shared<SequentialDevice>(ts), QStringLiteral("earlySparse"));
+            packetizer.setTransparent(true);
+            packetizer.setAnnounceEarly(true);
+            QString error;
+            ok &= expect(packetizer.open(0, &error), "early sparse PCR: opens: " + error.toStdString());
+            qsizetype bytes = 0;
+            M2tsObject object;
+            for (int i = 0; i < 100 && packetizer.readObject(8, &object, &error); ++i) {
+                bytes += object.payload.size();
+            }
+            ok &= expect(bytes > 0, "early sparse PCR: publishes after the packet bound");
+        }
     }
 
     const QString spts = dir.filePath("spts.ts");
