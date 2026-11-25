@@ -76,3 +76,4 @@ DerivedData/
 # Claude Code workspace metadata
 .claude/
 .tmp.dprobes.h
+__pycache__/

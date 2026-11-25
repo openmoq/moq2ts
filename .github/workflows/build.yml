@@ -86,6 +86,9 @@ jobs:
           done
           echo "skipped (need ../moqxr source): $(grep -l moqxr tests/*-guards.sh | tr '\n' ' ')"
 
+      - name: Interop client unit tests
+        run: python3 -m unittest discover -s interop -v
+
       - name: Package AppImage
         env:
           # Extract-and-run avoids needing FUSE on the runner image.
