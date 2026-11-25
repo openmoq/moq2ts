@@ -34,6 +34,9 @@ lead = int(os.environ['STUB_LEAD'])
 got = sys.stdin.buffer.read(lead * 188)
 event(who='pub', lead=len(got))
 print('[ready] namespace accepted', flush=True)
+if MODE == 'late':
+    print('[group] track=program-1 id=7', flush=True)
+    print('[group] track=program-1.timeline id=99', flush=True)
 first = sys.stdin.buffer.read(188)
 event(who='pub', media_after_active=os.path.exists(f'{DIR}/active'))
 rest = first + sys.stdin.buffer.read()
@@ -43,14 +46,18 @@ open(f'{DIR}/eof', 'w').close()
 
 RECEIVER = COMMON + '''
 event(who='rx', argv=sys.argv[1:])
+print('[rx] draft=22 selected=program-1 packet_size=188', file=sys.stderr, flush=True)
 time.sleep(0.2)
+if MODE == 'late':
+    time.sleep(float(arg('--subscribe-after')))
+    print('[rx] subscribe sent', file=sys.stderr, flush=True)
 open(f'{DIR}/active', 'w').close()
 print('[rx] subscription active', file=sys.stderr, flush=True)
 while MODE == 'hang' or not os.path.exists(f'{DIR}/eof'):
     time.sleep(0.05)
 if MODE != 'nothing':
     open(arg('--out'), 'wb').write(b'x' * 188)
-    open(arg('--object-log'), 'w').write('0 0 188\\n')
+    open(arg('--object-log'), 'w').write(('8 0 188\\n' if MODE == 'late' else '0 0 188\\n'))
 '''
 
 CHECKER = COMMON + '''
@@ -131,6 +138,36 @@ class SessionTest(unittest.TestCase):
         os.environ['STUB_MODE'] = 'only18'
         result = self.run_session(ready_timeout=1)
         self.assertEqual(result.error, session.NOT_READY)
+
+    def test_a_late_subscriber_subscribes_after_media_has_started(self):
+        os.environ['STUB_MODE'] = 'late'
+        result = self.run_session(join_at=0.4, settle=0.5, duration=1.5)
+        self.assertIsNone(result.error)
+        events = self.events()
+        receiver = next(e['argv'] for e in events if e['who'] == 'rx')
+        self.assertEqual(float(receiver[receiver.index('--subscribe-after') + 1]), 0.9)
+        # Media goes out without waiting for the subscription.
+        self.assertIn({'who': 'pub', 'media_after_active': False}, events)
+        # G and G' are the highest media Group opened; a timeline's do not count.
+        self.assertEqual((result.join_group, result.join_group_ok), (7, 7))
+        self.assertGreater(result.join_offset_ms, 100)
+
+    def test_the_late_subscriber_scenario_adds_the_join_point(self):
+        os.environ['STUB_MODE'] = 'late'
+        self.environ.update(MEDIA_JOIN_AT='0.2', MEDIA_SETTLE='0.3')
+        result = scenarios.SCENARIOS['ts-late-subscriber'](self.options('ts-late-subscriber'))
+        self.assertTrue(result.passed, result.checks)
+        self.assertEqual(result.checks[-1].name, 'join-point')
+        checker = next(e['argv'] for e in self.events() if e['who'] == 'checker')
+        self.assertEqual(checker[-1], '--late-join')
+        self.assertEqual((result.diag['join_group'], result.diag['join_group_ok']), (7, 7))
+        self.assertIn('join_offset_ms', result.diag)
+
+    def test_the_join_point_is_the_group_open_at_the_join_or_the_next(self):
+        for first, ok in ((6, False), (7, True), (8, True), (9, True), (10, False)):
+            self.assertEqual(scenarios.join_point(first, 7, 8).ok, ok, first)
+        for first, g, g_ok in ((None, 7, 8), (8, None, 8), (8, 7, None)):
+            self.assertFalse(scenarios.join_point(first, g, g_ok).ok)
 
     def test_the_log_tail_keeps_the_error_lines(self):
         log = self.dir / 'publisher.log'

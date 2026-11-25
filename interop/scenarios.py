@@ -15,9 +15,25 @@ CARRIAGE = {
     'ts-carriage-integrity': ('fixture.ts', []),
     'ts-clock-step': ('fixture-step.ts', ['--expect-step']),
     'ts-multi-program': ('fixture-mpts.ts', ['--programs', '3']),
+    'ts-late-subscriber': ('fixture.ts', ['--late-join']),
 }
 DRAFTS = (22, 18)
 PACKAGING = 'msfts-mpeg2ts'
+
+
+def join_point(first_group, join_group, join_group_ok):
+    """ts-late-subscriber: the lowest Group received is at least the one open at
+    SUBSCRIBE, and at most the one after the one open at SUBSCRIBE_OK."""
+    if first_group is None or join_group is None or join_group_ok is None:
+        return client.Check('join-point', False,
+                            f'unknown: first group {first_group}, open at the join {join_group}/{join_group_ok}')
+    return client.Check('join-point', join_group <= first_group <= join_group_ok + 1,
+                        f'first group {first_group}, {join_group} open at SUBSCRIBE, {join_group_ok} when accepted')
+
+
+def _first_group(objects):
+    groups = [int(line.split()[0]) for line in objects.read_text().splitlines() if line.split()]
+    return min(groups, default=None)
 
 
 def _session_options(options, workdir):
@@ -28,7 +44,9 @@ def _session_options(options, workdir):
         relay=options.relay, insecure=options.insecure, workdir=workdir,
         # The fixtures play for 20 s.
         duration=float(environ.get('MEDIA_FIXTURE_SECONDS', 20)),
-        ready_timeout=float(environ.get('MEDIA_READY_TIMEOUT', 5)))
+        ready_timeout=float(environ.get('MEDIA_READY_TIMEOUT', 5)),
+        join_at=float(environ.get('MEDIA_JOIN_AT', 8.5)) if options.test_id == 'ts-late-subscriber' else None,
+        settle=float(environ.get('MEDIA_SETTLE', 3)))
 
 
 def carriage(fixture_name, flags, options):
@@ -56,7 +74,12 @@ def carriage(fixture_name, flags, options):
         if options.verbose:
             print(output, end='', file=os.sys.stderr)
         diag.update(client.parse_diagnostics(output))
-        return client.Result(options.test_id, client.parse_checker(output, status), diag)
+        checks = client.parse_checker(output, status)
+        if options.test_id == 'ts-late-subscriber':
+            checks.append(join_point(_first_group(outcome.objects), outcome.join_group, outcome.join_group_ok))
+            diag.update(join_group=outcome.join_group, join_group_ok=outcome.join_group_ok,
+                        join_offset_ms=outcome.join_offset_ms)
+        return client.Result(options.test_id, checks, diag)
 
 
 SCENARIOS = {test_id: functools.partial(carriage, fixture, flags)
