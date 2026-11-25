@@ -46,6 +46,9 @@ immediately before it.
 - The cut applies only where a new Group would start. The first access point of
   a track that kept its lead-in starts no Group, as before.
 - A packet carried over for the cut is not a source gap and not a timed start.
+- A flagged packet that continues a flagged access unit (no
+  `payload_unit_start_indicator`) is no new access point: ISO/IEC 13818-1 lets
+  the flag repeat.
 - Lead-in drop: while discarding, a quiet input still answers "nothing yet", so
   the publisher serves the relay. Discarding stops, with a warning, after 10 s
   of PCR time (or 20,000 packets without a PCR) with no random access point, as

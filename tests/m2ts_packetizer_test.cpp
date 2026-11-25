@@ -2047,6 +2047,49 @@ int main() {
             ok &= expect(aligned(result, 3, 0), "cut at a gap: one Group starts there");
         }
         {
+            // ISO 13818-1 lets the flag repeat on later packets of the access
+            // unit: one Group, also where the run crosses an Object boundary.
+            QByteArray runs;
+            int counter = 0;
+            for (const int length : {6, 5, 7}) {
+                runs += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(9000), counter++ % 16, 0x40);
+                runs += tb::tsPacket(0x100, false, QByteArray(180, char(0)), counter++ % 16, 0x40);
+                runs += tb::tsPacket(0x100, false, QByteArray(180, char(0)), counter++ % 16, 0x40);
+                for (int i = 3; i < length; ++i) {
+                    runs += tb::tsPacket(0x100, false, QByteArray(184, char(0)), counter++ % 16);
+                }
+            }
+            for (const int perObject : {4, 2, 1}) {
+                M2tsPacketizer packetizer(std::make_shared<SequentialDevice>(tables + runs), QStringLiteral("cutRuns"));
+                ok &= expect(open(packetizer, true), "cut flag runs: opens");
+                QList<qsizetype> groupStarts;
+                QByteArray bytes;
+                M2tsObject object;
+                QString error;
+                std::uint64_t group = 0;
+                while (packetizer.readObject(perObject, &object, &error)) {
+                    if (bytes.isEmpty() || object.groupId != group) {
+                        groupStarts.append(bytes.size() / 188);
+                        group = object.groupId;
+                    }
+                    bytes += object.payload;
+                }
+                ok &= expect(groupStarts == QList<qsizetype>({0, 6, 11}) && bytes == runs,
+                             "cut flag runs, " + std::to_string(perObject) + " packets an Object: one Group each");
+            }
+            // Access units of one packet, each flagged, as audio can be: each
+            // still starts a Group.
+            QByteArray single;
+            for (int i = 0; i < 3; ++i) {
+                single += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(9000), i, 0x40);
+            }
+            M2tsPacketizer packetizer(std::make_shared<SequentialDevice>(tables + single), QStringLiteral("cutSingle"));
+            ok &= expect(open(packetizer, true), "cut one-packet units: opens");
+            const Read result = read(packetizer);
+            ok &= expect(result.objects.size() == 3 && result.objects.last().groupId == 2,
+                         "cut one-packet units: a Group each");
+        }
+        {
             QTemporaryDir files;
             const QString path = files.filePath("file.ts");
             ok &= expect(writeFile(path, tables + video), "cut: write the file");
