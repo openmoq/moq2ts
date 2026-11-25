@@ -28,6 +28,14 @@ MODE = os.environ.get('STUB_MODE', '')
 
 PUBLISHER = COMMON + '''
 event(who='pub', argv=sys.argv[1:])
+if MODE == 'restart':
+    second = '--initial-group-id' in sys.argv
+    sys.stdin.buffer.read(int(os.environ['STUB_LEAD']) * 188)
+    print('[ready] namespace accepted', flush=True)
+    rest = sys.stdin.buffer.read()
+    event(who='pub', second=second, bytes=len(rest), eof=True)
+    open(f'{DIR}/eof2' if second else f'{DIR}/eof', 'w').close()
+    sys.exit(0)
 if MODE == 'only18' and arg('--draft') == '22':
     time.sleep(60)
 lead = int(os.environ['STUB_LEAD'])
@@ -46,6 +54,22 @@ open(f'{DIR}/eof', 'w').close()
 
 RECEIVER = COMMON + '''
 event(who='rx', argv=sys.argv[1:])
+if MODE.startswith('restart'):
+    count = len([n for n in os.listdir(DIR) if n.startswith('rxrun')]) + 1
+    open(f'{DIR}/rxrun{count}', 'w').close()
+    print('[rx] draft=22 selected=program-1 packet_size=188', file=sys.stderr, flush=True)
+    print('[rx] subscription active', file=sys.stderr, flush=True)
+    group = 0 if count == 1 else 1000
+    if count == 1:
+        time.sleep(0.9)
+    else:
+        print(f'[rx] first object group={group} object=0', file=sys.stderr, flush=True)
+        while not os.path.exists(f'{DIR}/eof2'):
+            time.sleep(0.05)
+    open(arg('--out'), 'wb').write(bytes([count]) * 188)
+    open(arg('--object-log'), 'w').write(f'{group} 0 188\\n')
+    print('[rx] track ended', file=sys.stderr, flush=True)
+    sys.exit(0)
 print('[rx] draft=22 selected=program-1 packet_size=188', file=sys.stderr, flush=True)
 time.sleep(0.2)
 if MODE == 'late':
@@ -80,8 +104,10 @@ class SessionTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.dir = Path(temporary.name)
-        # Three packets, then a random access point, then 96 more.
-        data = b''.join([packet(0x11), packet(0), packet(0x1000), packet(0x100, rap=True)] + [packet(0x100)] * 96)
+        # Three packets, then a random access point, another at packet 60, and
+        # 100 packets in all.
+        data = b''.join([packet(0x11), packet(0), packet(0x1000), packet(0x100, rap=True)] + [packet(0x100)] * 56
+                        + [packet(0x100, rap=True)] + [packet(0x100)] * 39)
         self.fixtures = self.dir / 'fixtures'
         self.fixtures.mkdir()
         for name in ('fixture.ts', 'fixture-step.ts', 'fixture-mpts.ts'):
@@ -168,6 +194,50 @@ class SessionTest(unittest.TestCase):
             self.assertEqual(scenarios.join_point(first, 7, 8).ok, ok, first)
         for first, g, g_ok in ((None, 7, 8), (8, None, 8), (8, 7, None)):
             self.assertFalse(scenarios.join_point(first, g, g_ok).ok)
+
+    def restart(self, **overrides):
+        os.environ['STUB_MODE'] = 'restart'
+        options = session.SessionOptions(
+            cli=self.environ['MOQ2TS_CLI'], receiver=self.environ['MOQ2TS_RECEIVER'], relay='moqt://r:1',
+            insecure=True, workdir=self.dir / 'work', duration=2.0, ready_timeout=3, end_timeout=3,
+            restart_at=0.6, restart_dial=0.8)
+        for key, value in overrides.items():
+            setattr(options, key, value)
+        return session.run_restart(self.fixtures / 'fixture.ts', 'moq-test/t/1', 22, options)
+
+    def test_restart_replaces_the_publisher_and_joins_the_captures(self):
+        result = self.restart()
+        self.assertIsNone(result.error)
+        publishers = [e['argv'] for e in self.events() if e['who'] == 'pub' and 'argv' in e]
+        self.assertEqual(len(publishers), 2)
+        for argv in publishers:
+            self.assertEqual(argv[argv.index('--quic-idle-timeout') + 1], '2000')
+        self.assertNotIn('--initial-group-id', publishers[0])
+        self.assertEqual(publishers[1][publishers[1].index('--initial-group-id') + 1], '1000')
+        # The first publisher is killed: it never sees the end of its input.
+        self.assertEqual([e['second'] for e in self.events() if e.get('eof')], [True])
+        self.assertEqual(result.received.read_bytes(), b'\x01' * 188 + b'\x02' * 188)
+        self.assertEqual(result.objects.read_text(), '0 0 188\n1000 0 188\n')
+        self.assertEqual(result.subscriptions, ['track ended (exit 0)', 'track ended (exit 0)'])
+        self.assertGreaterEqual(result.recovery_ms, 0)
+        self.assertLess(result.recovery_ms, 3000)
+
+    def test_recovery_is_five_seconds_from_the_new_publisher(self):
+        self.assertTrue(scenarios.recovery(0).ok)
+        self.assertTrue(scenarios.recovery(5000).ok)
+        self.assertFalse(scenarios.recovery(5001).ok)
+        self.assertFalse(scenarios.recovery(None).ok)
+
+    def test_the_restart_scenario_adds_recovery(self):
+        os.environ['STUB_MODE'] = 'restart'
+        self.environ.update(MEDIA_RESTART_AT='0.6', MEDIA_RESTART_DIAL='0.8', MEDIA_FIXTURE_SECONDS='2')
+        result = scenarios.SCENARIOS['ts-publisher-restart'](self.options('ts-publisher-restart'))
+        self.assertTrue(result.passed, result.checks)
+        self.assertEqual(result.checks[-1].name, 'recovery')
+        checker = next(e['argv'] for e in self.events() if e['who'] == 'checker')
+        self.assertEqual(checker[-2:], ['--restart-at', '0.6'])
+        self.assertIn('recovery_ms', result.diag)
+        self.assertEqual(len(result.diag['subscriptions']), 2)
 
     def test_the_log_tail_keeps_the_error_lines(self):
         log = self.dir / 'publisher.log'

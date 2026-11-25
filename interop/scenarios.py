@@ -16,6 +16,8 @@ CARRIAGE = {
     'ts-clock-step': ('fixture-step.ts', ['--expect-step']),
     'ts-multi-program': ('fixture-mpts.ts', ['--programs', '3']),
     'ts-late-subscriber': ('fixture.ts', ['--late-join']),
+    # Its flags carry the time of the restart.
+    'ts-publisher-restart': ('fixture.ts', []),
 }
 DRAFTS = (22, 18)
 PACKAGING = 'msfts-mpeg2ts'
@@ -29,6 +31,14 @@ def join_point(first_group, join_group, join_group_ok):
                             f'unknown: first group {first_group}, open at the join {join_group}/{join_group_ok}')
     return client.Check('join-point', join_group <= first_group <= join_group_ok + 1,
                         f'first group {first_group}, {join_group} open at SUBSCRIBE, {join_group_ok} when accepted')
+
+
+def recovery(milliseconds):
+    """ts-publisher-restart: the new publisher's first object within 5 s of its
+    PUBLISH_NAMESPACE."""
+    if milliseconds is None:
+        return client.Check('recovery', False, 'no object of the second part arrived')
+    return client.Check('recovery', milliseconds <= 5000, f'{milliseconds} ms after the new namespace')
 
 
 def _first_group(objects):
@@ -46,10 +56,13 @@ def _session_options(options, workdir):
         duration=float(environ.get('MEDIA_FIXTURE_SECONDS', 20)),
         ready_timeout=float(environ.get('MEDIA_READY_TIMEOUT', 5)),
         join_at=float(environ.get('MEDIA_JOIN_AT', 8.5)) if options.test_id == 'ts-late-subscriber' else None,
-        settle=float(environ.get('MEDIA_SETTLE', 3)))
+        settle=float(environ.get('MEDIA_SETTLE', 3)),
+        restart_at=float(environ.get('MEDIA_RESTART_AT', 8)),
+        restart_dial=float(environ.get('MEDIA_RESTART_DIAL', 9)))
 
 
 def carriage(fixture_name, flags, options):
+    """Runs one scenario: a session on the fixture, then the checker."""
     environ = options.environ
     run_id = environ.get('MEDIA_RUN_ID') or secrets.token_hex(16)
     namespace = f'moq-test/{options.test_id}/{run_id}'
@@ -57,9 +70,10 @@ def carriage(fixture_name, flags, options):
     checker = environ.get('MEDIA_TS_CHECKER', '/app/check-ts.py')
     transport = 'webtransport' if options.relay.startswith('https://') else 'quic'
     with tempfile.TemporaryDirectory() as temporary:
+        restart = options.test_id == 'ts-publisher-restart'
+        run = session.run_restart if restart else session.run
         for draft in DRAFTS:
-            outcome = session.run(fixture, namespace, draft,
-                                  _session_options(options, Path(temporary) / f'draft{draft}'))
+            outcome = run(fixture, namespace, draft, _session_options(options, Path(temporary) / f'draft{draft}'))
             if outcome.error != session.NOT_READY:
                 break
         version = {'moqt_version': f'moqt-{draft}', 'transport': transport}
@@ -68,6 +82,8 @@ def carriage(fixture_name, flags, options):
         if outcome.error:
             detail = f'{outcome.error}; {outcome.log_tail()}'
             return client.Result(options.test_id, [client.Check('delivery', False, detail)], diag)
+        if restart:
+            flags = ['--restart-at', f'{_session_options(options, temporary).restart_at:g}']
         output, status = client.run_checker(
             [checker, '--fixture', str(fixture), '--received', str(outcome.received),
              '--objects', str(outcome.objects), *flags], timeout=60)
@@ -79,6 +95,9 @@ def carriage(fixture_name, flags, options):
             checks.append(join_point(_first_group(outcome.objects), outcome.join_group, outcome.join_group_ok))
             diag.update(join_group=outcome.join_group, join_group_ok=outcome.join_group_ok,
                         join_offset_ms=outcome.join_offset_ms)
+        if restart:
+            checks.append(recovery(outcome.recovery_ms))
+            diag.update(recovery_ms=outcome.recovery_ms, subscriptions=outcome.subscriptions)
         return client.Result(options.test_id, checks, diag)
 
 
