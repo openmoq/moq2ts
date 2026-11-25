@@ -425,6 +425,16 @@ packets to stdout. `--duration SECONDS` stops a live capture, and `--fail-on-gap
 returns failure when MOQT loss or packet validation errors are reported.
 `https://` URLs use WebTransport when the installed moq5 has that backend.
 
+When a track ends with a PUBLISH_DONE, for example because the relay dropped a
+publisher that died, the receiver waits for the data streams the message counts.
+`--done-wait MS` bounds that wait: 2000 ms by default, up to 600000, and `0`
+keeps moq5's 30 s. A shorter wait lets a supervisor restart the receiver on a
+restarted publisher sooner, but can lose the tail of data still in flight. A
+negotiated delivery timeout longer than the wait takes precedence. It applies to
+`moqt://` only; passing it with `https://` is a usage error, and WebTransport
+keeps moq5's 30 s. It needs a moq5 with `done_wait_timeout_us` in
+`moq_endpoint_cfg_t` (openmoq/moq5#74).
+
 The once-per-second readout includes checks corresponding to
 [ETSI TR 101 290 section 5.2](https://www.etsi.org/deliver/etsi_tr/101200_101299/101290/01.04.01_60/tr_101290v010401p.pdf);
 this is a subset of the standard's full monitoring checks.
