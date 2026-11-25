@@ -52,6 +52,10 @@ struct PublishedObject {
     // The closing catalog of MSF -01 Section 11.3, the source's last object:
     // moqxr ends every other track (PUBLISH_DONE) before sending it.
     bool endsBroadcast = false;
+    // A marker, never sent: the source has no Object yet. A live source
+    // returns it instead of blocking while its input is quiet, so that the
+    // publisher keeps serving the relay. None at all means the source ended.
+    bool idle = false;
 };
 
 // The totals of a publish, for the CLI's [final] line: what the publisher

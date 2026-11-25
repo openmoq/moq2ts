@@ -45,7 +45,8 @@ public:
         : m_source(std::move(source)) {}
 
     // The next Object to send, or none at the end of the source. Reads from
-    // the source only while nothing is ready.
+    // the source only while nothing is ready. An idle Object comes back at
+    // once, and the held Objects stay held.
     std::optional<ReadyObject> next() {
         while (m_ready.empty() && !m_ended) {
             std::optional<PublishedObject> object = m_source();
@@ -53,6 +54,9 @@ public:
                 m_ended = true;
                 releaseAll();
                 break;
+            }
+            if (object->idle) {
+                return ReadyObject{std::move(*object), false};
             }
             if (object->endsBroadcast) {
                 releaseAll();

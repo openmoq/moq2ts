@@ -321,6 +321,11 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                         return std::nullopt;
                     }
                     const PublishedObject& current = ready->object;
+                    // Nothing yet: moqxr serves the relay and asks again (see
+                    // is_finished below).
+                    if (current.idle) {
+                        return std::nullopt;
+                    }
                     const std::string track = current.trackName.toStdString();
                     const std::size_t groupId = static_cast<std::size_t>(current.groupId);
                     // After a reconnection, what remains of the Groups that the
@@ -364,6 +369,10 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                     };
                 }
             };
+
+            // No Object from next_object means the end only once the source has
+            // ended; until then moqxr keeps reading control messages.
+            source.is_finished = [state] { return state->sourceEnded.load(std::memory_order_acquire); };
 
             // The setup token, opaque here: moqxr sends it as the relay's
             // token type. The file is read at each connection, so that a
@@ -565,6 +574,9 @@ bool MoqxrPublisher::publishLiveObjectsMock(const QByteArray& catalog,
         std::optional<ReadyObject> ready = lookahead.next();
         if (!ready.has_value()) {
             break;
+        }
+        if (ready->object.idle) {
+            continue;
         }
         const PublishedObject* object = &ready->object;
         qDebug() << "MOCK MSFTS publish" << object->trackName << "group=" << object->groupId

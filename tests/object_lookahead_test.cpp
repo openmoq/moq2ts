@@ -33,6 +33,13 @@ PublishedObject endOf(const char* track) {
     return o;
 }
 
+// The source has no Object yet.
+PublishedObject nothingYet() {
+    PublishedObject o;
+    o.idle = true;
+    return o;
+}
+
 // A source that hands out a script, then ends.
 struct Script {
     std::deque<PublishedObject> objects;
@@ -58,6 +65,22 @@ std::string name(const ReadyObject& ready) {
 
 int main() {
     bool ok = true;
+
+    // "Nothing yet" comes straight back, and releases no held Object: the
+    // Group of a held one may still go on.
+    {
+        Script script;
+        script.objects = {object("a", 0, 0), nothingYet(), object("a", 1, 0)};
+        ObjectLookahead lookahead(script.source());
+        const auto first = lookahead.next();
+        ok &= expect(first && first->object.idle, "idle comes back at once");
+        ok &= expect(lookahead.pending() == 1, "idle releases no held Object");
+        std::string got;
+        while (const auto next = lookahead.next()) {
+            got += name(*next) + " ";
+        }
+        ok &= expect(got == "a/0/0F a/1/0F ", "after idle: " + got);
+    }
 
     // One track: the last Object of each Group is final, and the end of the
     // source closes the last Group.
