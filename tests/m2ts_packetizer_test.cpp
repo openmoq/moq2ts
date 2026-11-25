@@ -1104,8 +1104,9 @@ int main() {
         const GapRun none = run("gap-zero.fifo", true, 0);
         ok &= expect(none.error.isEmpty() && none.objects.size() == 3 &&
                          none.objects[0].payload == packet(2) + packet(3) + packet(4) &&
-                         none.objects[1].payload == packet(5) + packet(6) + packet(7) &&
-                         none.objects[1].groupId == 1 && none.objects[2].groupId == 1,
+                         none.objects[1].payload == packet(5) && none.objects[1].groupId == 0 &&
+                         none.objects[2].payload == packet(6) + packet(7) + packet(8) &&
+                         none.objects[2].groupId == 1,
                      "gap at offset 0: no gap, the Groups follow the RAPs");
     }
 
@@ -1915,6 +1916,148 @@ int main() {
         if (test.kind == "single RAP") {
             ok &= expect(secondStartPtsUs.has_value() && *secondStartPtsUs >= 10000000,
                          label + "the timer resumes 10 s after the random access point");
+        }
+    }
+
+    // A live Group starts with its random access point: the Object being filled
+    // ends before it.
+    {
+        const auto isRap = [](const QByteArray& packet, int prefix) {
+            return packet.size() >= prefix + 6 && pidOfPacket(packet.mid(prefix)) == 0x100 &&
+                   (static_cast<unsigned char>(packet[prefix + 3]) & 0x20) != 0 &&
+                   (static_cast<unsigned char>(packet[prefix + 5]) & 0x40) != 0;
+        };
+        const QByteArray tables = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}})) +
+                                  tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+        // GOPs of 6, 5 and 7 packets, none a multiple of the 4 of an Object.
+        QByteArray video;
+        int cc = 0;
+        for (const int length : {6, 5, 7}) {
+            video += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(9000), cc++ % 16, 0x40);
+            for (int i = 1; i < length; ++i) {
+                video += tb::tsPacket(0x100, false, QByteArray(184, char(0)), cc++ % 16);
+            }
+        }
+        const QByteArray rapAlone = tb::tsPacket(0x100, true, tb::pesHeaderWithPts(9000), cc % 16, 0x40);
+
+        struct Read {
+            QList<M2tsObject> objects;
+            QByteArray bytes;
+        };
+        const auto read = [](M2tsPacketizer& packetizer) {
+            Read result;
+            M2tsObject object;
+            QString error;
+            while (packetizer.readObject(4, &object, &error)) {
+                result.objects.append(object);
+                result.bytes += object.payload;
+            }
+            return result;
+        };
+        // Whether every Group starts with a random access point, its Group ID
+        // one more than the last and its Object IDs from 0.
+        const auto aligned = [&isRap](const Read& result, int groups, int prefix) {
+            std::uint64_t group = 0;
+            std::uint64_t object = 0;
+            int starts = 0;
+            for (const M2tsObject& o : result.objects) {
+                if (o.startsGroup) {
+                    if (!isRap(o.payload, prefix) || o.groupId != static_cast<std::uint64_t>(starts) || o.objectId != 0) {
+                        return false;
+                    }
+                    ++starts;
+                    group = o.groupId;
+                    object = 0;
+                } else if (isRap(o.payload, prefix) || o.groupId != group || o.objectId != ++object) {
+                    return false;
+                }
+            }
+            return starts == groups;
+        };
+        // The first Object of the track starts Group 0 whether or not it is
+        // marked as a start.
+        const auto open = [](M2tsPacketizer& packetizer, bool transparent) {
+            packetizer.setTransparent(transparent);
+            QString error;
+            return packetizer.open(0, &error);
+        };
+
+        {
+            M2tsPacketizer packetizer(std::make_shared<SequentialDevice>(tables + video + rapAlone), QStringLiteral("cut"));
+            ok &= expect(open(packetizer, true), "cut: opens");
+            Read result = read(packetizer);
+            if (!result.objects.isEmpty()) {
+                result.objects[0].startsGroup = true;
+            }
+            ok &= expect(aligned(result, 4, 0), "cut: each Group starts at its random access point");
+            ok &= expect(result.bytes == video + rapAlone, "cut: every packet once, in order, the last alone too");
+        }
+        {
+            M2tsPacketizer packetizer(std::make_shared<SequentialDevice>(tables + video), QStringLiteral("cutProgram"));
+            ok &= expect(open(packetizer, false), "cut per-program: opens");
+            Read result = read(packetizer);
+            if (!result.objects.isEmpty()) {
+                result.objects[0].startsGroup = true;
+            }
+            ok &= expect(aligned(result, 3, 0), "cut per-program: each Group starts at its random access point");
+        }
+        {
+            const auto m2ts = [](const QByteArray& ts) {
+                QByteArray out;
+                for (qsizetype offset = 0; offset < ts.size(); offset += 188) {
+                    const quint32 stamp = static_cast<quint32>(offset / 188) * 100u;
+                    for (int shift = 24; shift >= 0; shift -= 8) {
+                        out.append(static_cast<char>((stamp >> shift) & 0x3F));
+                    }
+                    out += ts.mid(offset, 188);
+                }
+                return out;
+            };
+            const QByteArray source = m2ts(tables + video);
+            M2tsPacketizer packetizer(std::make_shared<SequentialDevice>(source), QStringLiteral("cut192"));
+            ok &= expect(open(packetizer, true), "cut M2TS: opens");
+            Read result = read(packetizer);
+            if (!result.objects.isEmpty()) {
+                result.objects[0].startsGroup = true;
+            }
+            ok &= expect(aligned(result, 3, 4), "cut M2TS: each Group starts at its random access point");
+            ok &= expect(result.bytes == source.mid(2 * 192), "cut M2TS: each prefix travels with its packet");
+        }
+        {
+            // A source gap at the packet of an access point: one Group, not two.
+            auto gaps = std::make_shared<SourceGapLog>();
+            M2tsPacketizer packetizer(std::make_shared<SequentialDevice>(tables + video), QStringLiteral("cutGap"));
+            packetizer.setSourceGaps(gaps);
+            ok &= expect(open(packetizer, true), "cut at a gap: opens");
+            // Recorded after the first Object: a gap known before it is where
+            // the track starts.
+            Read result;
+            M2tsObject object;
+            QString error;
+            while (packetizer.readObject(4, &object, &error)) {
+                if (result.objects.isEmpty()) {
+                    gaps->record(static_cast<std::uint64_t>(tables.size() + 6 * 188));
+                }
+                result.objects.append(object);
+                result.bytes += object.payload;
+            }
+            if (!result.objects.isEmpty()) {
+                result.objects[0].startsGroup = true;
+            }
+            ok &= expect(aligned(result, 3, 0), "cut at a gap: one Group starts there");
+        }
+        {
+            QTemporaryDir files;
+            const QString path = files.filePath("file.ts");
+            ok &= expect(writeFile(path, tables + video), "cut: write the file");
+            M2tsPacketizer packetizer(path);
+            ok &= expect(open(packetizer, true), "cut: the file opens");
+            const Read result = read(packetizer);
+            bool whole = result.bytes == tables + video;
+            for (int i = 0; i + 1 < result.objects.size(); ++i) {
+                whole &= result.objects[i].payload.size() == 4 * 188;
+            }
+            ok &= expect(whole, "cut: a file keeps its Object sizes");
         }
     }
 

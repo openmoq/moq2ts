@@ -390,7 +390,7 @@ private:
     bool m_lastStartTimed = false;        // the last Group started on time
     std::int64_t m_groupStartPcr27 = -1;  // the PCR when the current Group started
     bool m_groupStartsTimed = false;      // the next Object starts a Group on time
-    bool m_carryTimed = false;            // m_carryPacket waits for a Group on time
+    bool m_carryIsBoundary = false;       // m_carryPacket waits for its Group, after no gap
     int m_timedGroups = 0;
     bool timedGroupDue();
     // The PID on which we trigger group boundaries. Set to the first PID where

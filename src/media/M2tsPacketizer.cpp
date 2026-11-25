@@ -1301,9 +1301,10 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     std::uint64_t firstOffset = 0;   // of the first packet in payload
     QByteArray payload;
     payload.reserve(packets * m_packetSize);
-    // Only a gap leaves a packet carried over.
-    const bool carriedForTime = std::exchange(m_carryTimed, false);
-    if (!m_carryPacket.isEmpty() && !carriedForTime) {
+    // A packet carried over to begin a Group on time or at its random access
+    // point is not a source gap; any other is.
+    const bool carriedForBoundary = std::exchange(m_carryIsBoundary, false);
+    if (!m_carryPacket.isEmpty() && !carriedForBoundary) {
         m_groupStartsAtGap = true;
         m_gapCauses |= std::exchange(m_carryGapCauses, 0u);
     }
@@ -1373,6 +1374,17 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         // keeps its buffer: not after the PAT rewrite below replaces it.
         const QByteArray tsView = QByteArray::fromRawData(packet.constData() + (m_packetSize == 192 ? 4 : 0), 188);
         const int pid = pidOf(tsView);
+        // A live Group starts with its random access point: where this packet
+        // will start one, the Object being filled ends before it. (Not
+        // startsRandomAccess(), which latches a group PID.)
+        if (m_sequential && !payload.isEmpty() && (m_sawFirstRap || m_timedGroups > 0) && pid == m_rapPid &&
+            hasRandomAccessIndicator(tsView)) {
+            m_carryPacket = std::move(packet);
+            m_carryOffset = packetOffset;
+            m_carryGapCauses = 0;
+            m_carryIsBoundary = true;
+            break;
+        }
         if (pid == m_pcrPid && (!m_sawFirstRap || !randomAccess())) {
             const std::int64_t pcr = pcrOf(tsView);
             if (pcr >= 0) {
@@ -1443,7 +1455,7 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
                 m_carryPacket = std::move(packet);
                 m_carryOffset = packetOffset;
                 m_carryGapCauses = 0;
-                m_carryTimed = true;
+                m_carryIsBoundary = true;
                 break;
             }
             m_groupStartsTimed = true;

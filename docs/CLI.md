@@ -234,7 +234,10 @@ ffmpeg -hide_banner -re \
 ```
 
 `-g 50` at 25 fps gives a random access point every 2 s. MSFTS-02 sets no
-maximum Group duration. To check received source packets against the sent feed,
+maximum Group duration. On a live source (SRT, FIFO, pipe) a Group that starts
+at a random access point starts with that packet: the Object before it ends
+there, so it can be shorter than `--segment-bytes`. A file source keeps the
+point inside the Group's first Object. To check received source packets against the sent feed,
 see "End-to-end tests" below.
 
 A multi-program feed is published as one `unmodified-multiplex` track:
