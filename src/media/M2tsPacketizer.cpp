@@ -1301,9 +1301,10 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
     std::uint64_t firstOffset = 0;   // of the first packet in payload
     QByteArray payload;
     payload.reserve(packets * m_packetSize);
-    // Only a gap leaves a packet carried over.
-    const bool carriedForTime = std::exchange(m_carryTimed, false);
-    if (!m_carryPacket.isEmpty() && !carriedForTime) {
+    // A packet carried over to begin a Group on time or at its random access
+    // point is not a source gap; any other is.
+    const bool carriedForBoundary = std::exchange(m_carryIsBoundary, false);
+    if (!m_carryPacket.isEmpty() && !carriedForBoundary) {
         m_groupStartsAtGap = true;
         m_gapCauses |= std::exchange(m_carryGapCauses, 0u);
     }
@@ -1317,6 +1318,11 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         }
     }
 
+    // Offsets in payload of flagged packets that continue a random access unit.
+    QList<qsizetype> rapContinuations;
+    // The Object holds a random access point: the first of the track does not
+    // start a Group, and the next one in the same Object still does.
+    bool holdsRap = false;
     std::optional<std::chrono::steady_clock::time_point> holdUntil;
     for (int index = 0; index < packets; ++index) {
         // A source that goes quiet does not hold the packets already read.
@@ -1373,6 +1379,25 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
         // keeps its buffer: not after the PAT rewrite below replaces it.
         const QByteArray tsView = QByteArray::fromRawData(packet.constData() + (m_packetSize == 192 ? 4 : 0), 188);
         const int pid = pidOf(tsView);
+        // ISO/IEC 13818-1 lets random_access_indicator repeat on later packets
+        // of an access unit: a flagged packet that continues one is no new
+        // random access point.
+        const bool flagged = pid == m_rapPid && hasRandomAccessIndicator(tsView);
+        const bool continuesRap = flagged && m_groupPidFlagged && !payloadUnitStart(tsView);
+        // A live Group starts with its random access point: where this packet
+        // will start one, the Object being filled ends before it. (Not
+        // startsRandomAccess(), which latches a group PID.)
+        if (m_sequential && !payload.isEmpty() && (m_sawFirstRap || m_timedGroups > 0 || holdsRap) && flagged &&
+            !continuesRap) {
+            m_carryPacket = std::move(packet);
+            m_carryOffset = packetOffset;
+            m_carryGapCauses = 0;
+            m_carryIsBoundary = true;
+            break;
+        }
+        if (pid == m_rapPid) {
+            m_groupPidFlagged = flagged;
+        }
         if (pid == m_pcrPid && (!m_sawFirstRap || !randomAccess())) {
             const std::int64_t pcr = pcrOf(tsView);
             if (pcr >= 0) {
@@ -1443,13 +1468,18 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
                 m_carryPacket = std::move(packet);
                 m_carryOffset = packetOffset;
                 m_carryGapCauses = 0;
-                m_carryTimed = true;
+                m_carryIsBoundary = true;
                 break;
             }
             m_groupStartsTimed = true;
         }
         if (payload.isEmpty()) {
             firstOffset = packetOffset;
+        }
+        if (continuesRap) {
+            rapContinuations.append(payload.size());
+        } else if (flagged) {
+            holdsRap = true;
         }
         payload += packet;
     }
@@ -1493,7 +1523,8 @@ bool M2tsPacketizer::readObject(int packetsPerObject, M2tsObject* object, QStrin
             }
         }
         // Skip PSI (PAT=0x0000, CAT=0x0001) and null (0x1FFF)
-        if (rapDetected || pid <= 0x001F || pid == 0x1FFF || !hasRandomAccessIndicator(tsView)) {
+        if (rapDetected || pid <= 0x001F || pid == 0x1FFF || !hasRandomAccessIndicator(tsView) ||
+            rapContinuations.contains(offset)) {
             continue;
         }
         // Use the known RAP PID if already identified from PAT/PMT or prior latch.
@@ -1659,6 +1690,8 @@ bool M2tsPacketizer::timedGroupDue() {
 }
 
 void M2tsPacketizer::restartAfterGap(bool discontinuity) {
+    // No access unit continues across the gap.
+    m_groupPidFlagged = false;
     // The PCR may jump across the gap.
     m_lastPcr27 = -1;
     m_groupStartPcr27 = -1;
@@ -1879,6 +1912,9 @@ bool M2tsPacketizer::startsRandomAccess(int pid, const QByteArray& tsPacket) {
 }
 
 void M2tsPacketizer::setGroupPid(int pid) {
+    if (pid != m_rapPid) {
+        m_groupPidFlagged = false;
+    }
     m_rapPid = pid;
     // Timed Groups start at a PES start. Without video, they follow the audio,
     // whatever PID carries the PCR: a PID of its own never starts a PES.
