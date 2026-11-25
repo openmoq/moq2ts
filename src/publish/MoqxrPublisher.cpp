@@ -1,4 +1,5 @@
 #include "MoqxrPublisher.h"
+#include "LiveSourceEnd.h"
 #include "ObjectLookahead.h"
 #include "ReconnectPolicy.h"
 
@@ -116,7 +117,7 @@ std::optional<openmoq::publisher::DraftVersion> toDraftVersion(int draft) {
 // discarded branch is not checked against a Config without the field.
 // What a live publish keeps across connections to the relay.
 struct LiveResumeState {
-    std::atomic<bool> sourceEnded{false};
+    moq2ts::LiveSourceEnd sourceEnd;
     std::atomic<int64_t> objects{0};
     std::atomic<int64_t> bytes{0};
     // The latest catalog, which every connection sends first.
@@ -321,17 +322,14 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                 }
 
                 for (;;) {
-                    std::optional<ReadyObject> ready = lookahead->next();
+                    // None for the end of the source, and for "nothing yet":
+                    // moqxr then serves the relay and asks again (see
+                    // is_finished below).
+                    std::optional<ReadyObject> ready = state->sourceEnd.take(lookahead->next());
                     if (!ready.has_value()) {
-                        state->sourceEnded.store(true, std::memory_order_release);
                         return std::nullopt;
                     }
                     const PublishedObject& current = ready->object;
-                    // Nothing yet: moqxr serves the relay and asks again (see
-                    // is_finished below).
-                    if (current.idle) {
-                        return std::nullopt;
-                    }
                     const std::string track = current.trackName.toStdString();
                     const std::size_t groupId = static_cast<std::size_t>(current.groupId);
                     // After a reconnection, what remains of the Groups that the
@@ -385,7 +383,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
 
             // No Object from next_object means the end only once the source has
             // ended; until then moqxr keeps reading control messages.
-            source.is_finished = [state] { return state->sourceEnded.load(std::memory_order_acquire); };
+            source.is_finished = [state] { return state->sourceEnd.finished(); };
 
             // The setup token, opaque here: moqxr sends it as the relay's
             // token type. The file is read at each connection, so that a
@@ -446,7 +444,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                 QMutexLocker locker(&m_mutex);
                 publisherStopped = !m_connected;
             }
-            const bool sourceEnded = state->sourceEnded.load(std::memory_order_acquire);
+            const bool sourceEnded = state->sourceEnd.finished();
             const bool stillRunning = running.load(std::memory_order_acquire);
             if (!status.ok && stillRunning && !publisherStopped) {
                 // The failed connection's count joins the totals before the
