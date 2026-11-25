@@ -69,6 +69,7 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--program <n>` | `0` | Per-program: the MPEG program to carry (0 = first). Unmodified multiplex: the reference program that the catalog names (0 = none) |
 | `--unmodified` | off | Unmodified carriage: forward every source packet unchanged (no PID filter or rewrite). The catalog carries the source PAT and PMT as initialization data. The track is `unmodified-program` for a single-program source and `unmodified-multiplex` otherwise; without a PAT the track is refused |
 | `--transparent`, `--publish-multiplex` | off | Aliases of `--unmodified`; `--transparent` is kept for existing scripts |
+| `--announce-early` | off | With `--unmodified`: publish the catalog as soon as the PAT and PMT arrive, without waiting for media, so that a subscriber can subscribe before it starts. The publisher reads nothing ahead: the catalog does not declare random access, no rate is measured from the PCR (give `--mux-rate` or `--video-bitrate` for the catalog bitrate), and packets before the first random access point are kept. Not for SRT ingest or `--config` |
 | `--retain-si` | off | Per-program mode: also keep DVB SI PIDs (NIT/SDT/EIT/TDT-TOT). The SDT and the EIT keep the carried service only; the NIT, BAT, TDT, and TOT pass unchanged |
 | `--si <list>` | none | Per-program mode: keep the listed DVB SI tables, a comma-separated list of `nit`, `sdt`, `bat`, `eit-pf`, `eit-schedule`, `tdt-tot`, or `all`. The PIDs are 0x0010 (NIT), 0x0011 (SDT and BAT), 0x0012 (EIT), and 0x0014 (TDT and TOT); the catalog lists them in `mpeg2tsSiPids`. When only one of SDT and BAT (or of `eit-pf` and `eit-schedule`) is listed, the PID is kept and the sections of the other table are dropped. The SDT and the EIT keep the carried service only. Combining `--si` with `--retain-si` is an error; `--retain-si` is the same as `--si all` |
 | `--retain-null` | off | Per-program mode: also keep null (0x1FFF) packets |
@@ -83,6 +84,7 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--auth-token-type <type>` | `16` | The token type of the authorization token, as the relay expects it (moqx: `auth.token_type`) |
 | `--quic-idle-timeout <ms>` | `0` | The QUIC idle timeout offered to the relay. A relay that vanished, for example after a restart, is noticed within it, so a live publish reconnects sooner. Below 5000 ms it also shortens each connection attempt, so a relay that does not answer fails sooner; above that, moqxr's own 5 s handshake wait applies. `0` keeps the default, 30 s; otherwise from 1000 to 600000. Needs a moqxr with `EndpointConfig::idle_timeout_ms` |
 | `--insecure` | off | Do not verify the relay certificate. By default it is verified against `$SSL_CERT_FILE` or the system CA bundle, so a relay with a self-signed certificate needs this flag; use it for local or test relays only |
+| `--log-groups` | off | Print `[group] track=<name> id=<n>` on stdout when the first Object of each Group of a media track goes to the publisher, with the Group ID on the wire. With several `--endpoint` values, once per Group. Not with `--config` |
 | `--paced` | off | File sources only: pace publishing at media rate instead of as fast as possible |
 | `--width/--height/--fps/--video-bitrate` | 1920/1080/30/2500 | Capture params |
 | `--sample-rate/--channels/--audio-bitrate/--audio-codec` | 48000/2/160/aac | Audio params |
@@ -424,6 +426,13 @@ program tracks exist. Use `--track NAME` to select a particular track. It writes
 packets to stdout. `--duration SECONDS` stops a live capture, and `--fail-on-gap`
 returns failure when MOQT loss or packet validation errors are reported.
 `https://` URLs use WebTransport when the installed moq5 has that backend.
+
+`--object-log FILE` writes one line, `<group> <object> <bytes>`, for each Object
+written to `--out`, in write order. `--subscribe-after SECONDS` (0 to 3600,
+decimals allowed) holds the track subscription until that long after the process
+started; the catalog is read at once. The receiver prints `[rx] subscribe sent`
+when it asks for the track and `[rx] subscription active` once the track is
+delivering.
 
 When a track ends with a PUBLISH_DONE, for example because the relay dropped a
 publisher that died, the receiver waits for the data streams the message counts.

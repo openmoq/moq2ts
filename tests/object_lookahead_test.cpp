@@ -1,3 +1,4 @@
+#include "publish/LiveSourceEnd.h"
 #include "publish/ObjectLookahead.h"
 
 #include <algorithm>
@@ -33,6 +34,13 @@ PublishedObject endOf(const char* track) {
     return o;
 }
 
+// The source has no Object yet.
+PublishedObject nothingYet() {
+    PublishedObject o;
+    o.idle = true;
+    return o;
+}
+
 // A source that hands out a script, then ends.
 struct Script {
     std::deque<PublishedObject> objects;
@@ -58,6 +66,43 @@ std::string name(const ReadyObject& ready) {
 
 int main() {
     bool ok = true;
+
+    // "Nothing yet" comes straight back, and releases no held Object: the
+    // Group of a held one may still go on.
+    {
+        Script script;
+        script.objects = {object("a", 0, 0), nothingYet(), object("a", 1, 0)};
+        ObjectLookahead lookahead(script.source());
+        const auto first = lookahead.next();
+        ok &= expect(first && first->object.idle, "idle comes back at once");
+        ok &= expect(lookahead.pending() == 1, "idle releases no held Object");
+        std::string got;
+        while (const auto next = lookahead.next()) {
+            got += name(*next) + " ";
+        }
+        ok &= expect(got == "a/0/0F a/1/0F ", "after idle: " + got);
+    }
+
+    // What the publisher is given, and whether none means the end. "Nothing
+    // yet" is none while not finished; the end of the source is none and
+    // finished. Nothing yet after the closing Object is the end too: a second
+    // read of the source must not look like a source that goes on.
+    {
+        using moq2ts::LiveSourceEnd;
+        LiveSourceEnd end;
+        ok &= expect(!end.take(ReadyObject{nothingYet(), false}).has_value() && !end.finished(),
+                     "nothing yet: none, not finished");
+        ok &= expect(end.take(ReadyObject{object("a", 0, 0), true}).has_value() && !end.finished(),
+                     "an Object: published, not finished");
+        ok &= expect(!end.take(std::nullopt).has_value() && end.finished(), "end of source: none, finished");
+        LiveSourceEnd closing;
+        PublishedObject last = object("catalog", 1, 0, true);
+        last.endsBroadcast = true;
+        ok &= expect(closing.take(ReadyObject{last, true}).has_value() && closing.finished(),
+                     "the closing Object: published, then finished");
+        ok &= expect(!closing.take(ReadyObject{nothingYet(), false}).has_value() && closing.finished(),
+                     "nothing yet after the closing Object: still finished");
+    }
 
     // One track: the last Object of each Group is final, and the end of the
     // source closes the last Group.

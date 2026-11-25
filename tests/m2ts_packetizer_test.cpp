@@ -27,6 +27,7 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <future>
 
 using moq2ts::M2tsObject;
 using moq2ts::M2tsPacketizer;
@@ -211,11 +212,88 @@ bool timedOpen(const QString& fifo, const QByteArray& ts, int program, bool* ran
     return opened;
 }
 
+// Opens an early-announce packetizer on a FIFO that holds only data and stays
+// open, as a source whose media has not started. returned says whether open()
+// came back within wait; the packetizer then reads the rest after more is
+// written and the FIFO closes.
+struct EarlyOpen {
+    bool returned = false;
+    bool opened = false;
+    bool randomAccess = true;
+    bool initData = false;
+    qint64 muxRate = -1;
+    QList<std::uint64_t> groups;
+    qsizetype bytes = 0;
+};
+
+EarlyOpen openEarly(const QString& fifo, const QByteArray& data, std::chrono::milliseconds wait,
+                    const QByteArray& more = {}) {
+    EarlyOpen result;
+    ::mkfifo(fifo.toLocal8Bit().constData(), 0600);
+    int fd = -1;
+    std::thread writer([&] {
+        fd = ::open(fifo.toLocal8Bit().constData(), O_WRONLY);
+        if (fd >= 0 && ::write(fd, data.constData(), data.size()) != data.size()) {
+            std::cerr << "short FIFO write\n";
+        }
+    });
+    M2tsPacketizer packetizer(fifo);
+    packetizer.setTransparent(true);
+    packetizer.setAnnounceEarly(true);
+    QString error;
+    auto open = std::async(std::launch::async, [&] { return packetizer.open(0, &error); });
+    result.returned = open.wait_for(wait) == std::future_status::ready;
+    writer.join();
+    if (result.returned && !more.isEmpty() && ::write(fd, more.constData(), more.size()) != more.size()) {
+        std::cerr << "short FIFO write\n";
+    }
+    ::close(fd);   // also ends an open() that still waits
+    result.opened = open.get();
+    if (result.returned && result.opened) {
+        result.randomAccess = packetizer.randomAccess();
+        result.initData = !packetizer.initData().isEmpty();
+        result.muxRate = packetizer.measuredMuxRate();
+        M2tsObject object;
+        while (packetizer.readObject(1, &object, &error)) {
+            result.groups.append(object.groupId);
+            result.bytes += object.payload.size();
+        }
+    }
+    return result;
+}
+
 int main() {
     std::signal(SIGPIPE, SIG_IGN);
     bool ok = true;
     QTemporaryDir dir;
     ok &= expect(dir.isValid(), "temporary directory");
+
+    // Early announce: the tables alone open a live source.
+    {
+        using namespace std::chrono_literals;
+        const QByteArray sdt = tb::psiPacket(0x0011, tb::longSection(0x42, 1, QByteArray(3, char(0))));
+        const QByteArray tables = tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}})) +
+                                  tb::psiPacket(0x1000, tb::pmtSection(1, 0x100, {{0x1B, 0x100}}));
+        // Video from the middle of a GOP, then a random access point.
+        QByteArray media = tb::tsPacket(0x100, false, QByteArray(184, char(0)), 0);
+        media += tb::tsPacket(0x100, true, tb::pesHeaderWithPts(9000), 1, 0x40);
+        const EarlyOpen three = openEarly(dir.filePath("early3"), sdt + tables, 2000ms, media);
+        ok &= expect(three.returned && three.opened, "early: SDT, PAT and PMT open the source");
+        ok &= expect(!three.randomAccess, "early: random access is not declared");
+        ok &= expect(three.initData, "early: the catalog has initData");
+        ok &= expect(three.muxRate == 0, "early: no rate is measured");
+        ok &= expect(three.bytes == sdt.size() + tables.size() + media.size(), "early: no packet is dropped");
+        ok &= expect(!three.groups.isEmpty() && three.groups.count(0) == three.groups.size(),
+                     "early: packets before the first random access point stay in Group 0");
+        const EarlyOpen two = openEarly(dir.filePath("early2"), tables, 2000ms);
+        ok &= expect(two.returned && two.opened, "early: PAT and PMT alone open the source");
+        // A multiplex whose first PMT has not come: no track without tables.
+        const EarlyOpen late = openEarly(dir.filePath("earlyLate"),
+                                         tb::psiPacket(0x0000, tb::patSection({{1, 0x1000}, {2, 0x1001}})) +
+                                             tb::psiPacket(0x1001, tb::pmtSection(2, 0x200, {{0x1B, 0x200}})),
+                                         500ms);
+        ok &= expect(!late.returned, "early: open waits for the first program's PMT");
+    }
 
     const QString spts = dir.filePath("spts.ts");
     const QString mpts = dir.filePath("mpts.ts");

@@ -467,6 +467,11 @@ if(UNIX AND NOT APPLE)
     add_test(NAME moq2ts-cli-version COMMAND moq2ts-cli --version)
     set_tests_properties(moq2ts-cli-version PROPERTIES
         PASS_REGULAR_EXPRESSION "moq2ts-cli ${PROJECT_VERSION}")
+    # --announce-early is for unmodified carriage.
+    add_test(NAME moq2ts-cli-announce-early COMMAND moq2ts-cli --announce-early
+             --endpoint mock://local --namespace a --video none.ts)
+    set_tests_properties(moq2ts-cli-announce-early PROPERTIES
+        PASS_REGULAR_EXPRESSION "--announce-early needs --unmodified")
 
     # Pure V4L2 mode-selection logic test (no Qt/libav deps).
     add_executable(moq2ts-v4l2-selection-tests
@@ -600,6 +605,13 @@ if(UNIX AND NOT APPLE)
     target_include_directories(moq2ts-live-pipeline-end-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(moq2ts-live-pipeline-end-tests PRIVATE moq2ts-core ${CORE_QT_LIBS})
     add_test(NAME moq2ts-live-pipeline-end-tests COMMAND moq2ts-live-pipeline-end-tests)
+
+    # The pipeline while its live input is quiet.
+    add_executable(moq2ts-live-pipeline-idle-tests tests/live_pipeline_idle_test.cpp)
+    target_include_directories(moq2ts-live-pipeline-idle-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-live-pipeline-idle-tests PRIVATE moq2ts-core ${CORE_QT_LIBS})
+    add_test(NAME moq2ts-live-pipeline-idle-tests COMMAND moq2ts-live-pipeline-idle-tests)
+    set_tests_properties(moq2ts-live-pipeline-idle-tests PROPERTIES TIMEOUT 60)
 endif()
 
 # MPTS tests, only where the MPTS sources are compiled in.

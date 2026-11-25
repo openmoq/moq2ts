@@ -34,6 +34,8 @@ typedef struct options {
     unsigned duration;
     unsigned draft;   /* 22 (the default) or 18 */
     unsigned done_wait_ms;   /* 0 keeps moq5's default */
+    const char *object_log_path;
+    double subscribe_after;   /* seconds from the start of the process */
     bool insecure;
     bool fail_on_gap;
 } options_t;
@@ -48,6 +50,9 @@ static void usage(FILE *out) {
     fputs("moq2ts-receiver --url moqt://host:port --namespace live/name --out capture.ts\n"
           "  [--track NAME] [--stats-json FILE] [--duration SECONDS] [--draft 22|18]\n"
           "  [--insecure] [--fail-on-gap] [--done-wait MS]\n"
+          "  [--object-log FILE] [--subscribe-after SECONDS]\n"
+          "  --object-log writes \"group object bytes\" for each Object written to --out.\n"
+          "  --subscribe-after delays the track subscription until that long after start.\n"
           "  --done-wait bounds the wait for the last data of an ended track (moqt://\n"
           "  only; default 2000 ms, 0 keeps moq5's 30 s).\n"
           "  https:// URLs use WebTransport when moq5 was built with that backend.\n"
@@ -76,6 +81,14 @@ static bool parse_options(int argc, char **argv, options_t *o) {
             o->out_path = argv[++i];
         } else if (i + 1 < argc && !strcmp(argv[i], "--stats-json")) {
             o->stats_path = argv[++i];
+        } else if (i + 1 < argc && !strcmp(argv[i], "--object-log")) {
+            o->object_log_path = argv[++i];
+        } else if (i + 1 < argc && !strcmp(argv[i], "--subscribe-after")) {
+            const char *value = argv[++i];
+            char *end = NULL;
+            double seconds = strtod(value, &end);
+            if (value[0] < '0' || value[0] > '9' || *end || !(seconds <= 3600)) return false;
+            o->subscribe_after = seconds;
         } else if (i + 1 < argc && !strcmp(argv[i], "--draft")) {
             const char *draft = argv[++i];
             if (!strcmp(draft, "22")) o->draft = 22;
@@ -195,6 +208,7 @@ static bool write_stats(const char *path, uint64_t objects, uint64_t bytes,
 }
 
 int main(int argc, char **argv) {
+    const double process_start = monotonic_seconds();
     options_t opt;
     if (!parse_options(argc, argv, &opt)) {
         usage(stderr);
@@ -210,6 +224,12 @@ int main(int argc, char **argv) {
     }
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+    FILE *object_log = NULL;
+    if (opt.object_log_path && !(object_log = fopen(opt.object_log_path, "wb"))) {
+        fprintf(stderr, "object log open failed: %s\n", opt.object_log_path);
+        free(ns);
+        return 1;
+    }
 
     moq_endpoint_cfg_t ec;
     moq_endpoint_cfg_init_sized(&ec, sizeof(ec));
@@ -252,6 +272,7 @@ int main(int argc, char **argv) {
     size_t found_count = 0;
     candidate_t *selected = NULL;
     bool catalog_ready = false, fatal = false, ended = false;
+    bool subscribed = false, active = false;
     FILE *out = NULL;
     receiver_ts_stats_t ts;
     receiver_ts_stats_init(&ts);
@@ -297,10 +318,8 @@ int main(int argc, char **argv) {
                 print_safe(selected->desc->name);
                 fprintf(stderr, " packet_size=%u\n", selected->ts->packet_size);
                 out = !strcmp(opt.out_path, "-") ? stdout : fopen(opt.out_path, "wb");
-                moq_result_t sub_rc = out ? moq_media_receiver_subscribe_track(rx, selected->handle, NULL)
-                                          : MOQ_ERR_INTERNAL;
-                if (!out || sub_rc != MOQ_OK) {
-                    fprintf(stderr, "output open or subscribe failed: %s\n", moq_strerror(sub_rc));
+                if (!out) {
+                    fputs("output open failed\n", stderr);
                     fatal = true;
                     break;
                 }
@@ -321,6 +340,23 @@ int main(int argc, char **argv) {
         /* Objects queued before the end are still written; the loop exits
          * after them. */
         if (fatal) break;
+        if (selected && !subscribed && monotonic_seconds() - process_start >= opt.subscribe_after) {
+            moq_result_t sub_rc = moq_media_receiver_subscribe_track(rx, selected->handle, NULL);
+            if (sub_rc != MOQ_OK) {
+                fprintf(stderr, "subscribe failed: %s\n", moq_strerror(sub_rc));
+                fatal = true;
+                break;
+            }
+            subscribed = true;
+            fputs("[rx] subscribe sent\n", stderr);
+        }
+        moq_media_track_state_t state;
+        if (subscribed && !active &&
+            moq_media_receiver_track_state(rx, selected->handle, &state) == MOQ_OK &&
+            state == MOQ_MEDIA_TRACK_STATE_ACTIVE) {
+            active = true;
+            fputs("[rx] subscription active\n", stderr);
+        }
         moq_media_object_t obj;
         while (moq_media_receiver_poll_object(rx, &obj, sizeof(obj)) == MOQ_OK) {
             bool duplicate = false;
@@ -352,6 +388,12 @@ int main(int argc, char **argv) {
                     fatal = true;
                 } else if (fwrite(obj.payload.data, 1, obj.payload.len, out) != obj.payload.len) {
                     fputs("output write failed\n", stderr);
+                    fatal = true;
+                } else if (object_log &&
+                           fprintf(object_log, "%llu %llu %llu\n", (unsigned long long)obj.group_id,
+                                   (unsigned long long)obj.object_id,
+                                   (unsigned long long)obj.payload.len) < 0) {
+                    fputs("object log write failed\n", stderr);
                     fatal = true;
                 } else {
                     objects++;
@@ -405,6 +447,7 @@ int main(int argc, char **argv) {
     }
     if (out && out != stdout && fclose(out) != 0) fatal = true;
     if (out == stdout && fflush(out) != 0) fatal = true;
+    if (object_log && fclose(object_log) != 0) fatal = true;
     if (!write_stats(opt.stats_path, objects, bytes, groups, &ts, &stats)) {
         fputs("stats write failed\n", stderr);
         fatal = true;

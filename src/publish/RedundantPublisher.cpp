@@ -33,6 +33,16 @@ std::unique_ptr<RedundantPublisher::Path> RedundantPublisher::makePath(int index
                              raw->totals.recordPulled(objects, bytes);
                          },
                          Qt::DirectConnection);
+        QObject::connect(path->moqxr, &MoqxrPublisher::groupOpened, this,
+                         [this](const QString& track, qulonglong group) {
+                             std::lock_guard lock(m_groupMutex);
+                             const auto [opened, first] = m_openedGroup.try_emplace(track, group);
+                             if (first || group > opened->second) {
+                                 opened->second = group;
+                                 emit groupOpened(track, group);
+                             }
+                         },
+                         Qt::DirectConnection);
         QObject::connect(path->moqxr, &MoqxrPublisher::sentTotals, this,
                          [raw](int64_t objects, int64_t bytes) { raw->totals.recordSent(objects, bytes); },
                          Qt::DirectConnection);
@@ -134,17 +144,18 @@ bool RedundantPublisher::publishLiveObjects(const PublishConfig& cfg,
         threads.emplace_back([this, &path, index, pathCfg, &mediaTrackName, &sideTrackNames, &catalog, &running]() {
             PathQueue* queue = &path.queue;
             auto next = [this, queue, &running]() -> std::optional<PublishedObject> {
-                for (;;) {
-                    if (!running.load(std::memory_order_acquire) || !m_connected.load(std::memory_order_acquire)) {
-                        return std::nullopt;
-                    }
-                    if (std::optional<PublishedObject> object = queue->pop(kPopWait)) {
-                        return object;
-                    }
-                    if (queue->drained()) {
-                        return std::nullopt;
-                    }
+                if (!running.load(std::memory_order_acquire) || !m_connected.load(std::memory_order_acquire)) {
+                    return std::nullopt;
                 }
+                if (std::optional<PublishedObject> object = queue->pop(kPopWait)) {
+                    return object;
+                }
+                if (queue->drained()) {
+                    return std::nullopt;
+                }
+                PublishedObject nothingYet;
+                nothingYet.idle = true;
+                return nothingYet;
             };
             const bool ok = path.output->publishLiveObjects(pathCfg, mediaTrackName, sideTrackNames, catalog,
                                                             std::move(next), running);
@@ -173,6 +184,10 @@ bool RedundantPublisher::publishLiveObjects(const PublishConfig& cfg,
         std::optional<PublishedObject> object = nextObject();
         if (!object.has_value()) {
             break;
+        }
+        // Each path says so itself when its own queue is empty.
+        if (object->idle) {
+            continue;
         }
         for (const auto& path : m_paths) {
             path->queue.push(*object);

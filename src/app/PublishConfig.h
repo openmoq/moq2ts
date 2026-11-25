@@ -64,6 +64,9 @@ struct PublishConfig {
     QSet<SiTable> siTables;
     bool retainNullPackets = false; // filtered path: also keep null (0x1FFF) packets
     int mpeg2tsMuxRateBps = 0;      // advisory source mux rate; 0 omits the catalog hint
+    // Declare the track from the PAT and PMT alone, before media arrives
+    // (unmodified carriage).
+    bool announceEarly = false;
     bool pacedFileSource = false;    // pace file-source publishing at media-time rate
     int draftVersion = 22;              // MOQT transport draft version
     bool insecure = false;              // skip verifying the relay certificate (--insecure)

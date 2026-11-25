@@ -1,4 +1,5 @@
 #include "MoqxrPublisher.h"
+#include "LiveSourceEnd.h"
 #include "ObjectLookahead.h"
 #include "ReconnectPolicy.h"
 
@@ -25,6 +26,10 @@
 #endif
 
 namespace {
+
+bool isMediaTrack(const QString& track) {
+    return track != QLatin1String(moq2ts::kCatalogTrackName) && !track.endsWith(QLatin1String(".timeline"));
+}
 
 bool useMockTransport(const moq2ts::PublishConfig& cfg) {
     return cfg.moqEndpoint.trimmed().startsWith(QStringLiteral("mock://"), Qt::CaseInsensitive);
@@ -112,13 +117,15 @@ std::optional<openmoq::publisher::DraftVersion> toDraftVersion(int draft) {
 // discarded branch is not checked against a Config without the field.
 // What a live publish keeps across connections to the relay.
 struct LiveResumeState {
-    std::atomic<bool> sourceEnded{false};
+    moq2ts::LiveSourceEnd sourceEnd;
     std::atomic<int64_t> objects{0};
     std::atomic<int64_t> bytes{0};
     // The latest catalog, which every connection sends first.
     QByteArray catalog;
     // The highest Group of each track that was handed to moqxr.
     std::map<std::string, std::size_t> highestGroup;
+    // The last Group of each media track that groupOpened reported.
+    std::map<std::string, std::size_t> openedGroup;
     // After a reconnection: Objects of these Groups and earlier are dropped.
     std::map<std::string, std::size_t> skipUpTo;
 };
@@ -315,9 +322,11 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                 }
 
                 for (;;) {
-                    std::optional<ReadyObject> ready = lookahead->next();
+                    // None for the end of the source, and for "nothing yet":
+                    // moqxr then serves the relay and asks again (see
+                    // is_finished below).
+                    std::optional<ReadyObject> ready = state->sourceEnd.take(lookahead->next());
                     if (!ready.has_value()) {
-                        state->sourceEnded.store(true, std::memory_order_release);
                         return std::nullopt;
                     }
                     const PublishedObject& current = ready->object;
@@ -345,6 +354,13 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                     const int64_t bytes = state->bytes.fetch_add(current.payload.size(), std::memory_order_acq_rel) +
                                           current.payload.size();
                     emit framePublished(current.trackName, bytes, objects);
+                    if (isMediaTrack(current.trackName)) {
+                        const auto [opened, first] = state->openedGroup.try_emplace(track, wireGroupId);
+                        if (first || opened->second != wireGroupId) {
+                            opened->second = wireGroupId;
+                            emit groupOpened(current.trackName, wireGroupId);
+                        }
+                    }
 
                     return openmoq::publisher::LiveObject{
                         .track_name = track,
@@ -364,6 +380,10 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                     };
                 }
             };
+
+            // No Object from next_object means the end only once the source has
+            // ended; until then moqxr keeps reading control messages.
+            source.is_finished = [state] { return state->sourceEnd.finished(); };
 
             // The setup token, opaque here: moqxr sends it as the relay's
             // token type. The file is read at each connection, so that a
@@ -424,7 +444,7 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                 QMutexLocker locker(&m_mutex);
                 publisherStopped = !m_connected;
             }
-            const bool sourceEnded = state->sourceEnded.load(std::memory_order_acquire);
+            const bool sourceEnded = state->sourceEnd.finished();
             const bool stillRunning = running.load(std::memory_order_acquire);
             if (!status.ok && stillRunning && !publisherStopped) {
                 // The failed connection's count joins the totals before the
@@ -561,10 +581,14 @@ bool MoqxrPublisher::publishLiveObjectsMock(const QByteArray& catalog,
     // The same look-ahead as the real path, so the mock logs what it would
     // send. It sends what it pulls.
     ObjectLookahead lookahead(std::move(nextObject));
+    std::map<QString, std::uint64_t> openedGroup;
     while (running.load(std::memory_order_acquire)) {
         std::optional<ReadyObject> ready = lookahead.next();
         if (!ready.has_value()) {
             break;
+        }
+        if (ready->object.idle) {
+            continue;
         }
         const PublishedObject* object = &ready->object;
         qDebug() << "MOCK MSFTS publish" << object->trackName << "group=" << object->groupId
@@ -574,6 +598,13 @@ bool MoqxrPublisher::publishLiveObjectsMock(const QByteArray& catalog,
         ++publisherObjects;
         publisherBytes += object->payload.size();
         emit framePublished(object->trackName, publisherBytes, publisherObjects);
+        if (isMediaTrack(object->trackName)) {
+            const auto [opened, first] = openedGroup.try_emplace(object->trackName, object->groupId);
+            if (first || opened->second != object->groupId) {
+                opened->second = object->groupId;
+                emit groupOpened(object->trackName, object->groupId);
+            }
+        }
         if (pacingMs > 0) {
             QThread::msleep(static_cast<unsigned long>(pacingMs));
         }

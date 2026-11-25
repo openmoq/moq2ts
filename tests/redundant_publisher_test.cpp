@@ -131,6 +131,10 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         while (std::optional<PublishedObject> object = nextObject()) {
+            if (object->idle) {
+                idles.fetch_add(1);
+                continue;
+            }
             const bool hangs = (stallAfter >= 0 && static_cast<int>(objects.size()) + 1 == stallAfter) ||
                                (hangAtEnd && object->endsBroadcast);
             objects.push_back(std::move(*object));
@@ -149,6 +153,8 @@ public:
     PublishConfig config;
     std::vector<PublishedObject> objects;
     std::atomic<int> received{0};
+    // How often its source said it had no Object yet.
+    std::atomic<int> idles{0};
     // Goes quiet after taking this many Objects, or after the end of the
     // broadcast, until stop().
     int stallAfter = -1;
@@ -180,6 +186,53 @@ int main() {
         ok &= expect(RedundantPublisher::needed(twoRelays()), "two endpoints: RedundantPublisher");
         RedundantPublisher publisher([](int) { return std::make_unique<TestPath>(); }, moq2ts::kPathQueueBytes);
         ok &= expect(!publisher.connect(one), "the composite refuses one endpoint");
+    }
+
+    // While its queue is empty and open, a path's source says "nothing yet",
+    // so that its publisher can serve the relay. The producer's own "nothing
+    // yet" is not queued.
+    {
+        std::vector<TestPath*> paths;
+        RedundantPublisher publisher(
+            [&paths](int) {
+                auto path = std::make_unique<TestPath>();
+                paths.push_back(path.get());
+                return path;
+            },
+            moq2ts::kPathQueueBytes);
+        const PublishConfig cfg = twoRelays();
+        ok &= expect(publisher.connect(cfg), "idle: two paths connect");
+        std::atomic<bool> running{true};
+        int step = 0;
+        bool quietSeen = false;
+        const auto source = [&]() -> std::optional<PublishedObject> {
+            if (step++ == 0) {
+                // Wait for both paths to report a quiet queue.
+                for (int i = 0; i < 400 && !(paths[0]->idles > 0 && paths[1]->idles > 0); ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                quietSeen = paths[0]->idles > 0 && paths[1]->idles > 0;
+                PublishedObject nothing;
+                nothing.idle = true;
+                return nothing;
+            }
+            if (step == 2) {
+                PublishedObject media;
+                media.trackName = QStringLiteral("program-1");
+                media.payload = QByteArray(10, 'x');
+                media.startsGroup = true;
+                return media;
+            }
+            return std::nullopt;
+        };
+        ok &= expect(publisher.publishLiveObjects(cfg, QStringLiteral("program-1"), {}, QByteArray("{}"), source,
+                                                  running),
+                     "idle: publish succeeds");
+        ok &= expect(quietSeen, "idle: a quiet queue reaches the path as idle");
+        for (TestPath* path : paths) {
+            ok &= expect(path->objects.size() == 1 && !path->objects.front().idle,
+                         "idle: the producer's idle Object is not queued");
+        }
     }
 
     // Both paths get every Object, with the same Group and Object IDs, in
