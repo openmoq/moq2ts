@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(moq2ts-ui
-    VERSION 1.3.0
+    VERSION 1.4.0
     DESCRIPTION "Cross-platform MOQ live publisher for H.264/AAC-Opus M2TS"
     LANGUAGES C CXX)
 
@@ -445,6 +445,7 @@ set_target_properties(moq2ts-cli PROPERTIES
 )
 target_include_directories(moq2ts-cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(moq2ts-cli PRIVATE moq2ts-core ${CORE_QT_LIBS})
+target_compile_definitions(moq2ts-cli PRIVATE MOQ2TS_VERSION="${PROJECT_VERSION}")
 
 install(TARGETS moq2ts-cli
     RUNTIME DESTINATION bin
@@ -461,6 +462,11 @@ if(UNIX AND NOT APPLE)
     target_include_directories(moq2ts-moqt-draft-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(moq2ts-moqt-draft-tests PRIVATE moq2ts-core)
     add_test(NAME moq2ts-moqt-draft-tests COMMAND moq2ts-moqt-draft-tests)
+
+    # The CLI reports the project version, not a literal of its own.
+    add_test(NAME moq2ts-cli-version COMMAND moq2ts-cli --version)
+    set_tests_properties(moq2ts-cli-version PROPERTIES
+        PASS_REGULAR_EXPRESSION "moq2ts-cli ${PROJECT_VERSION}")
 
     # Pure V4L2 mode-selection logic test (no Qt/libav deps).
     add_executable(moq2ts-v4l2-selection-tests
