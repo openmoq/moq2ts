@@ -33,6 +33,16 @@ std::unique_ptr<RedundantPublisher::Path> RedundantPublisher::makePath(int index
                              raw->totals.recordPulled(objects, bytes);
                          },
                          Qt::DirectConnection);
+        QObject::connect(path->moqxr, &MoqxrPublisher::groupOpened, this,
+                         [this](const QString& track, qulonglong group) {
+                             std::lock_guard lock(m_groupMutex);
+                             const auto [opened, first] = m_openedGroup.try_emplace(track, group);
+                             if (first || group > opened->second) {
+                                 opened->second = group;
+                                 emit groupOpened(track, group);
+                             }
+                         },
+                         Qt::DirectConnection);
         QObject::connect(path->moqxr, &MoqxrPublisher::sentTotals, this,
                          [raw](int64_t objects, int64_t bytes) { raw->totals.recordSent(objects, bytes); },
                          Qt::DirectConnection);

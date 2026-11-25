@@ -219,6 +219,9 @@ signals:
     // Each Object handed to moqxr, with the running totals: what was
     // pulled, which moqxr may drop while nobody subscribes.
     void framePublished(const QString& track, int64_t bytes, int64_t objects);
+    // The first Object of a new Group of a media track was handed to moqxr,
+    // with the Group ID it has on the wire. Not for the catalog or timelines.
+    void groupOpened(const QString& track, qulonglong groupId);
     // What moqxr wrote, from its statistics, once a publish ends without an
     // error. Not emitted after a failed publish: moqxr then keeps no count.
     void sentTotals(int64_t objects, int64_t bytes);

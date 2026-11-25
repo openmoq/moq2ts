@@ -84,6 +84,7 @@ Binaries: `build/moq2ts-cli` (real) or `build-mock/moq2ts-cli` (mock).
 | `--auth-token-type <type>` | `16` | The token type of the authorization token, as the relay expects it (moqx: `auth.token_type`) |
 | `--quic-idle-timeout <ms>` | `0` | The QUIC idle timeout offered to the relay. A relay that vanished, for example after a restart, is noticed within it, so a live publish reconnects sooner. Below 5000 ms it also shortens each connection attempt, so a relay that does not answer fails sooner; above that, moqxr's own 5 s handshake wait applies. `0` keeps the default, 30 s; otherwise from 1000 to 600000. Needs a moqxr with `EndpointConfig::idle_timeout_ms` |
 | `--insecure` | off | Do not verify the relay certificate. By default it is verified against `$SSL_CERT_FILE` or the system CA bundle, so a relay with a self-signed certificate needs this flag; use it for local or test relays only |
+| `--log-groups` | off | Print `[group] track=<name> id=<n>` on stdout when the first Object of each Group of a media track goes to the publisher, with the Group ID on the wire. With several `--endpoint` values, once per Group. Not with `--config` |
 | `--paced` | off | File sources only: pace publishing at media rate instead of as fast as possible |
 | `--width/--height/--fps/--video-bitrate` | 1920/1080/30/2500 | Capture params |
 | `--sample-rate/--channels/--audio-bitrate/--audio-codec` | 48000/2/160/aac | Audio params |

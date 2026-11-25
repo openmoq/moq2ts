@@ -8,6 +8,8 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
+#include <mutex>
 #include <memory>
 #include <vector>
 
@@ -94,8 +96,13 @@ signals:
     void connectionStateChanged(bool connected, const QString& message);
     // Only when no path can publish: a path's own errors are logged.
     void publishError(const QString& error);
+    // As MoqxrPublisher::groupOpened, once for all the paths: when the first
+    // path opens the Group. Emitted from a path's thread.
+    void groupOpened(const QString& track, qulonglong groupId);
 
 private:
+    std::mutex m_groupMutex;
+    std::map<QString, qulonglong> m_openedGroup;
     struct Path {
         explicit Path(std::int64_t queueBytes)
             : queue(queueBytes) {}

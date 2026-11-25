@@ -421,6 +421,8 @@ int main(int argc, char** argv) {
     parser.addOption(QCommandLineOption(QStringLiteral("announce-early"),
         QStringLiteral("With --unmodified: publish the catalog as soon as the PAT and PMT arrive, without "
                        "waiting for media. The catalog then does not declare random access.")));
+    parser.addOption(QCommandLineOption(QStringLiteral("log-groups"),
+        QStringLiteral("Print a [group] line for each Group of a media track.")));
     parser.addOption(QCommandLineOption(QStringLiteral("paced"),
         QStringLiteral("Pace file-source publishing at media-time rate (prevents dumping all data at wire speed).")));
     addValue(QStringLiteral("draft"), QStringLiteral("MOQT transport draft version: 14, 16, 17, 18, 21 or 22. The relay must list it."),
@@ -735,6 +737,19 @@ int main(int argc, char** argv) {
     // Declared before the pipeline, so that it outlives it.
     const std::unique_ptr<moq2ts::RedundantPublisher> redundant = makeRedundantPublisher(app, cfg, failed);
     moq2ts::IMoqOutput* output = redundant ? static_cast<moq2ts::IMoqOutput*>(redundant.get()) : &publisher;
+    if (parser.isSet(QStringLiteral("log-groups"))) {
+        const auto logGroup = [](const QString& track, qulonglong group) {
+            logLine(stdout, "group", QStringLiteral("track=%1 id=%2").arg(track).arg(group));
+        };
+        // One relay publishes through publisher, several through redundant.
+        if (redundant) {
+            QObject::connect(redundant.get(), &moq2ts::RedundantPublisher::groupOpened, &app, logGroup,
+                             Qt::DirectConnection);
+        } else {
+            QObject::connect(&publisher, &moq2ts::MoqxrPublisher::groupOpened, &app, logGroup,
+                             Qt::DirectConnection);
+        }
+    }
     moq2ts::LivePipeline pipeline;
 
     QObject::connect(&pipeline, &moq2ts::LivePipeline::status, &app, [](const QString& m) {

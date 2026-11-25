@@ -1,6 +1,7 @@
 #include "app/PublishConfig.h"
 #include "media/LivePipeline.h"
 #include "publish/MoqxrPublisher.h"
+#include "publish/RedundantPublisher.h"
 #include "ts_test_builder.h"
 
 #include <QCoreApplication>
@@ -18,6 +19,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 namespace tb = moq2ts::test;
@@ -226,6 +228,83 @@ int main(int argc, char** argv) {
         run.pipeline.requestStop();
         ok &= expect(waitFor([&] { return run.recorder.ended.load(); }), "stop: the source ends");
         ok &= expect(std::chrono::steady_clock::now() - asked < std::chrono::seconds(1), "stop: within 1 s");
+    }
+
+    // groupOpened: once per Group of a media track, never for the catalog or a
+    // timeline.
+    {
+        PublishConfig cfg;
+        cfg.moqEndpoint = QStringLiteral("mock://local");
+        cfg.fragmentDurationMs = 0;
+        moq2ts::MoqxrPublisher publisher;
+        QStringList opened;
+        QObject::connect(&publisher, &moq2ts::MoqxrPublisher::groupOpened, &publisher,
+                         [&opened](const QString& track, qulonglong group) {
+                             opened << QStringLiteral("%1/%2").arg(track).arg(group);
+                         },
+                         Qt::DirectConnection);
+        std::vector<PublishedObject> script;
+        for (const auto& [track, group, id] : {std::tuple{"program-1", 0, 0}, std::tuple{"program-1.timeline", 0, 0},
+                                               std::tuple{"program-1", 0, 1}, std::tuple{"program-1", 1, 0},
+                                               std::tuple{"program-1.timeline", 1, 0}}) {
+            PublishedObject object;
+            object.trackName = QString::fromLatin1(track);
+            object.groupId = static_cast<std::uint64_t>(group);
+            object.objectId = static_cast<std::uint64_t>(id);
+            object.payload = QByteArray(188, 'x');
+            object.finalInGroup = object.trackName.endsWith(QStringLiteral(".timeline"));
+            script.push_back(object);
+        }
+        std::size_t next = 0;
+        std::atomic<bool> running{true};
+        ok &= expect(publisher.connect(cfg), "groups: connect");
+        publisher.publishLiveObjects(cfg, QStringLiteral("program-1"), {QStringLiteral("program-1.timeline")},
+                                     QByteArray("{}"),
+                                     [&]() -> std::optional<PublishedObject> {
+                                         if (next == script.size()) {
+                                             return std::nullopt;
+                                         }
+                                         return script[next++];
+                                     },
+                                     running);
+        ok &= expect(opened == QStringList({QStringLiteral("program-1/0"), QStringLiteral("program-1/1")}),
+                     "groups: " + opened.join(' ').toStdString());
+    }
+
+    // Several relays report each Group once.
+    {
+        PublishConfig cfg;
+        cfg.moqEndpoints = {QStringLiteral("mock://a"), QStringLiteral("mock://b")};
+        cfg.moqEndpoint = cfg.moqEndpoints.first();
+        cfg.fragmentDurationMs = 0;
+        moq2ts::RedundantPublisher publisher;
+        QStringList opened;
+        std::mutex mutex;
+        QObject::connect(&publisher, &moq2ts::RedundantPublisher::groupOpened, &publisher,
+                         [&](const QString& track, qulonglong group) {
+                             std::lock_guard lock(mutex);
+                             opened << QStringLiteral("%1/%2").arg(track).arg(group);
+                         },
+                         Qt::DirectConnection);
+        std::uint64_t group = 0;
+        std::atomic<bool> running{true};
+        ok &= expect(publisher.connect(cfg), "relays: connect");
+        publisher.publishLiveObjects(cfg, QStringLiteral("program-1"), {}, QByteArray("{}"),
+                                     [&]() -> std::optional<PublishedObject> {
+                                         if (group == 3) {
+                                             return std::nullopt;
+                                         }
+                                         PublishedObject object;
+                                         object.trackName = QStringLiteral("program-1");
+                                         object.groupId = group++;
+                                         object.startsGroup = true;
+                                         object.payload = QByteArray(188, 'x');
+                                         return object;
+                                     },
+                                     running);
+        ok &= expect(opened == QStringList({QStringLiteral("program-1/0"), QStringLiteral("program-1/1"),
+                                            QStringLiteral("program-1/2")}),
+                     "relays: " + opened.join(' ').toStdString());
     }
 
     return ok ? 0 : 1;

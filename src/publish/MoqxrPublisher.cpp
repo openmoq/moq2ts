@@ -26,6 +26,10 @@
 
 namespace {
 
+bool isMediaTrack(const QString& track) {
+    return track != QLatin1String(moq2ts::kCatalogTrackName) && !track.endsWith(QLatin1String(".timeline"));
+}
+
 bool useMockTransport(const moq2ts::PublishConfig& cfg) {
     return cfg.moqEndpoint.trimmed().startsWith(QStringLiteral("mock://"), Qt::CaseInsensitive);
 }
@@ -119,6 +123,8 @@ struct LiveResumeState {
     QByteArray catalog;
     // The highest Group of each track that was handed to moqxr.
     std::map<std::string, std::size_t> highestGroup;
+    // The last Group of each media track that groupOpened reported.
+    std::map<std::string, std::size_t> openedGroup;
     // After a reconnection: Objects of these Groups and earlier are dropped.
     std::map<std::string, std::size_t> skipUpTo;
 };
@@ -350,6 +356,13 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                     const int64_t bytes = state->bytes.fetch_add(current.payload.size(), std::memory_order_acq_rel) +
                                           current.payload.size();
                     emit framePublished(current.trackName, bytes, objects);
+                    if (isMediaTrack(current.trackName)) {
+                        const auto [opened, first] = state->openedGroup.try_emplace(track, wireGroupId);
+                        if (first || opened->second != wireGroupId) {
+                            opened->second = wireGroupId;
+                            emit groupOpened(current.trackName, wireGroupId);
+                        }
+                    }
 
                     return openmoq::publisher::LiveObject{
                         .track_name = track,
@@ -570,6 +583,7 @@ bool MoqxrPublisher::publishLiveObjectsMock(const QByteArray& catalog,
     // The same look-ahead as the real path, so the mock logs what it would
     // send. It sends what it pulls.
     ObjectLookahead lookahead(std::move(nextObject));
+    std::map<QString, std::uint64_t> openedGroup;
     while (running.load(std::memory_order_acquire)) {
         std::optional<ReadyObject> ready = lookahead.next();
         if (!ready.has_value()) {
@@ -586,6 +600,13 @@ bool MoqxrPublisher::publishLiveObjectsMock(const QByteArray& catalog,
         ++publisherObjects;
         publisherBytes += object->payload.size();
         emit framePublished(object->trackName, publisherBytes, publisherObjects);
+        if (isMediaTrack(object->trackName)) {
+            const auto [opened, first] = openedGroup.try_emplace(object->trackName, object->groupId);
+            if (first || opened->second != object->groupId) {
+                opened->second = object->groupId;
+                emit groupOpened(object->trackName, object->groupId);
+            }
+        }
         if (pacingMs > 0) {
             QThread::msleep(static_cast<unsigned long>(pacingMs));
         }
