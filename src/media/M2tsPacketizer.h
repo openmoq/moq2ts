@@ -215,6 +215,11 @@ public:
     // False for an unmodified multiplex opened without a requested program: the
     // catalog then names no reference program (draft "Unmodified Multiplex").
     bool namesProgram() const;
+    // True when a live source has no packet to give within msecs: nothing is
+    // buffered here and nothing arrives. False at the end of the source, which
+    // readObject reports. Always false for a file, and on Windows, where
+    // readObject waits as before.
+    bool inputQuiet(int msecs);
     // The PID whose random access points start Groups, or -1 while unknown.
     int groupPid() const;
     // True when the PMT of the selected program lists a video stream.

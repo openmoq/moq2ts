@@ -600,6 +600,13 @@ if(UNIX AND NOT APPLE)
     target_include_directories(moq2ts-live-pipeline-end-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(moq2ts-live-pipeline-end-tests PRIVATE moq2ts-core ${CORE_QT_LIBS})
     add_test(NAME moq2ts-live-pipeline-end-tests COMMAND moq2ts-live-pipeline-end-tests)
+
+    # The pipeline while its live input is quiet.
+    add_executable(moq2ts-live-pipeline-idle-tests tests/live_pipeline_idle_test.cpp)
+    target_include_directories(moq2ts-live-pipeline-idle-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-live-pipeline-idle-tests PRIVATE moq2ts-core ${CORE_QT_LIBS})
+    add_test(NAME moq2ts-live-pipeline-idle-tests COMMAND moq2ts-live-pipeline-idle-tests)
+    set_tests_properties(moq2ts-live-pipeline-idle-tests PROPERTIES TIMEOUT 60)
 endif()
 
 # MPTS tests, only where the MPTS sources are compiled in.

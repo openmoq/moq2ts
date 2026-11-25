@@ -1896,6 +1896,16 @@ bool M2tsPacketizer::randomAccess() const {
     return m_dropLeadIn && (!m_sourceGaps || !m_transparent);
 }
 
+bool M2tsPacketizer::inputQuiet(int msecs) {
+    // m_prebuffer and m_unread are consumed by position, not emptied.
+    if (!m_sequential || !m_carryPacket.isEmpty() || m_prebufferPos < m_prebuffer.size() ||
+        m_unread.size() - m_unreadPos >= m_packetSize) {
+        return false;
+    }
+    return !packetBefore(*m_device, m_packetSize,
+                         std::chrono::steady_clock::now() + std::chrono::milliseconds(msecs));
+}
+
 bool M2tsPacketizer::namesProgram() const {
     return !(m_transparent && m_patProgramCount > 1) || m_requestedProgramNumber != 0;
 }

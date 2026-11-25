@@ -96,6 +96,9 @@ std::optional<PublishedObject> endBroadcast(PublishState* st) {
     return catalog;
 }
 
+// How long a read waits for input before the source says it has nothing yet.
+constexpr int kQuietInputMs = 20;
+
 } // namespace
 
 PublishedObject timelineObject(TimelineHistory* history,
@@ -506,6 +509,14 @@ void LivePipeline::runLoop() {
                 PublishedObject next = std::move(st->pending.front());
                 st->pending.pop_front();
                 return next;
+            }
+
+            // A quiet input does not block the publisher, which has the relay
+            // to serve: it asks again.
+            if (st->packetizer->inputQuiet(kQuietInputMs)) {
+                PublishedObject nothingYet;
+                nothingYet.idle = true;
+                return nothingYet;
             }
 
             M2tsObject object;
