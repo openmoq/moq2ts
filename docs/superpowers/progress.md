@@ -6,17 +6,21 @@ Last updated: 2026-11-25. Update this file when work stops.
 
 1. `git switch feat/interop-client` (local, not pushed).
 2. Executing `docs/superpowers/plans/2026-11-25-interop-client-image.md` natively.
-   Tasks 1 to 6 are built; Tasks 1 to 5 and the image are committed.
-3. **Uncommitted in the working tree:** the decided change for the 120 s limit
-   (run the five scenarios at once; `MEDIA_SEQUENTIAL=1` for one at a time).
-   Full run in the image 24 to 26 s.
-4. **Open, investigate before committing it:** intermittent tail loss. 3 of 19
-   concurrent full runs on draft 18 ended 2 to 3 objects short (clock step twice,
-   restart's second part once), with no gap or drop reported and all objects
-   written by the publisher. The failing receiver had "track ended" and the
-   catalog removal pending together. Not yet isolated: publisher closing early,
-   the relay, or moq5's receiver. Next step: relay-side logging of what it
-   received and the PUBLISH_DONE stream count.
+   Tasks 1 to 6 are done and committed.
+3. The five scenarios run at once to fit the 120 s limit (`MEDIA_SEQUENTIAL=1`
+   for one at a time). Full run in the image 24 to 26 s.
+4. **Tail loss: cause identified; fix on its own branch off `main`.** Concurrent full runs on
+   draft 18 (moq-dev relay) lose the last Object or few in clock step or the
+   restart's second part, about 1 run in 8, with no gap or drop reported.
+   In the failing restart runs traced, the relay never finished forwarding the
+   last group: the publisher's PUBLISH_DONE and CONNECTION_CLOSE arrived within
+   about 1 ms. The publisher closes as soon as its data is acknowledged
+   (`MoqxrPublisher.cpp`, `disconnect` after `publish_live_objects`).
+   A/B with a throwaway publisher that waits 2 s before closing after a clean
+   end of source: 45 of 45 concurrent runs passed; the unpatched control failed
+   at run 10. (A first 45-run loop with the wait was invalid: its image lacked
+   the concurrency change.) Inferred, not checked in relay code: the relay drops
+   unread stream data when the connection closes.
 5. Then Task 7 (WebTransport), Task 8 (CI publish; needs a PR), Task 9 (runner
    entry; ask first), and one review of the whole branch.
 
