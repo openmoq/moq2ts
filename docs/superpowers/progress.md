@@ -1,17 +1,18 @@
 # Progress: MoQ interop client and related work
 
-Last updated: 2026-11-25. Update this file when work stops.
+Last updated: 2026-11-26. Update this file when work stops.
 
 ## Resume here
 
-1. `git switch feat/interop-client` (local, not pushed), rebased on `main`
-   after #85.
+1. `git switch feat/interop-client`: pushed, with its pull request open
+   against `main` (rebased after #85).
 2. Plan `docs/superpowers/plans/2026-11-25-interop-client-image.md`: Tasks 1 to
    7 done. Task 8 (CI builds and publishes the image) is committed but has not
    run on GitHub. The whole-branch review is done and its findings fixed;
    deferred minor points are in the ledger.
-3. Next: push and open the PR (ask first). After the first `v*` tag the ghcr
-   package has to be made public by hand.
+3. Next: wait for CI on the PR (its image job completes Task 8); merge only on
+   the maintainer's word. After the first `v*` tag the ghcr package has to be
+   made public by hand.
 4. Task 9 (runner entry) waits for moq-interop-runner#209; ask first.
 5. The tail loss is fixed by #85 (`--close-delay`); the rebased image passed
    45 of 45 full runs.
