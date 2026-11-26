@@ -70,6 +70,8 @@ struct PublishConfig {
     // Declare the track from the PAT and PMT alone, before media arrives
     // (unmodified carriage).
     bool announceEarly = false;
+    // The Group ID of the first Group of each media track.
+    std::uint64_t initialGroupId = 0;
     bool pacedFileSource = false;    // pace file-source publishing at media-time rate
     int draftVersion = 22;              // MOQT transport draft version
     bool insecure = false;              // skip verifying the relay certificate (--insecure)

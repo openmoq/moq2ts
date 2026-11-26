@@ -148,6 +148,9 @@ public:
     // empty payload while the input is quiet before the first point. Set
     // before open().
     void setAnnounceEarly(bool early) { m_announceEarly = early; }
+    // The track's first Group has this ID, and the rest count on from it. Set
+    // before open().
+    void setInitialGroupId(std::uint64_t groupId) { m_currentGroupId = groupId; }
     void setRetainSiTables(bool retain);         // all SI tables; setSiTables(allSiTables())
     void setSiTables(QSet<SiTable> tables);      // keep these SI tables beside the program
     void setRetainNullPackets(bool retain);      // keep null (0x1FFF) packets

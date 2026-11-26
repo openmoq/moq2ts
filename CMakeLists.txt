@@ -472,6 +472,10 @@ if(UNIX AND NOT APPLE)
              --endpoint mock://local --namespace a --video none.ts)
     set_tests_properties(moq2ts-cli-announce-early PROPERTIES
         PASS_REGULAR_EXPRESSION "--announce-early needs --unmodified")
+    add_test(NAME moq2ts-cli-initial-group-id COMMAND moq2ts-cli --initial-group-id -1
+             --endpoint mock://local --namespace a --video none.ts)
+    set_tests_properties(moq2ts-cli-initial-group-id PROPERTIES
+        PASS_REGULAR_EXPRESSION "--initial-group-id must be")
 
     # Pure V4L2 mode-selection logic test (no Qt/libav deps).
     add_executable(moq2ts-v4l2-selection-tests

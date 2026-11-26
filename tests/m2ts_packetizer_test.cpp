@@ -2242,6 +2242,17 @@ int main() {
                          "cut one-packet units: a Group each");
         }
         {
+            // The track's Groups count from the given ID, as a publisher that
+            // takes over from another does.
+            M2tsPacketizer packetizer(std::make_shared<SequentialDevice>(tables + video), QStringLiteral("initial"));
+            packetizer.setInitialGroupId(100);
+            ok &= expect(open(packetizer, true), "initial Group ID: opens");
+            const Read result = read(packetizer);
+            ok &= expect(!result.objects.isEmpty() && result.objects.first().groupId == 100 &&
+                             result.objects.first().objectId == 0 && result.objects.last().groupId == 102,
+                         "initial Group ID: Groups 100 to 102");
+        }
+        {
             QTemporaryDir files;
             const QString path = files.filePath("file.ts");
             ok &= expect(writeFile(path, tables + video), "cut: write the file");
