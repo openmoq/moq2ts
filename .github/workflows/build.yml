@@ -300,6 +300,57 @@ jobs:
           path: dist/moq2ts-publisher-windows.zip
           if-no-files-found: error
 
+  interop-image:
+    name: interop client image
+    needs: linux
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Built for a pull request that can change the image, for a tag, and on
+      # request. Published for a tag only.
+      - name: Decide whether to build
+        id: decide
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          build=true
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            changed="$(git diff --name-only "$BASE_SHA...HEAD")"
+            grep -qE '^(interop/|src/|cmake/|CMakeLists\.txt$|\.dockerignore$|\.github/workflows/build\.yml$)' \
+              <<<"$changed" || build=false
+          elif [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF_TYPE" != tag ]; then
+            build=false
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+      - name: Build the image
+        if: steps.decide.outputs.build == 'true'
+        run: |
+          set -eu
+          IMAGE=moq2ts-interop-client:ci bash interop/build.sh \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          docker run --rm moq2ts-interop-client:ci --list
+
+      - name: Publish the image
+        if: steps.decide.outputs.build == 'true' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          name=ghcr.io/openmoq/moq2ts-interop-client
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for tag in "$GITHUB_REF_NAME" latest; do
+            docker tag moq2ts-interop-client:ci "$name:$tag"
+            docker push "$name:$tag"
+          done
+
   release:
     name: release
     needs: [linux, macos, windows]
