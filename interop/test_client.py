@@ -172,6 +172,28 @@ class MainTest(unittest.TestCase):
         self.assertIn('relay refused', out)
 
 
+class RelayUrlTest(unittest.TestCase):
+    def relay_seen_by_a_scenario(self, url):
+        seen = []
+
+        def record(options):
+            seen.append(options.relay)
+            return passing(options)
+
+        run_main(['--relay', url, '--test', 'ts-clock-step'], {}, {'ts-clock-step': record})
+        return seen[0]
+
+    # Without a path the publisher takes "/" and the receiver "/moq", and
+    # they then meet in different places on the relay.
+    def test_https_without_a_path_gets_the_root_path(self):
+        self.assertEqual(self.relay_seen_by_a_scenario('https://relay:4443'), 'https://relay:4443/')
+        self.assertEqual(self.relay_seen_by_a_scenario('https://relay:4443?jwt=a'), 'https://relay:4443/?jwt=a')
+
+    def test_other_urls_are_passed_through(self):
+        for url in ('https://relay:4443/', 'https://relay:4443/anon', 'moqt://relay:4443'):
+            self.assertEqual(self.relay_seen_by_a_scenario(url), url)
+
+
 class ChildrenTest(unittest.TestCase):
     def test_a_child_that_ignores_sigterm_is_killed(self):
         script = 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print("up", flush=True); time.sleep(60)'

@@ -85,9 +85,21 @@ time. Chosen over registering two entries.
    The first plan was to feed the fixture's leading tables, wait for the
    receiver to subscribe, then pace the rest. It does not work; see below.
 2. **WebTransport.** The receiver has not been built or run with it. Restart
-   over WebTransport also depends on #81.
+   over WebTransport also depends on #81. See the result below.
 3. **TSDuck on Ubuntu 24.04.** Package availability at the runner's version is
    unchecked.
+
+### Result for risk 2 (2026-11-25): WebTransport works
+
+moq5 `573955c` builds with `MOQ_BUILD_ADAPTER_PICO_WT` and
+`MOQ_BUILD_PICO_WT_MANAGED`, and the image carries both. Over `https://` to a
+loopback `moq-relay` all five scenarios passed in three of three runs,
+publisher restart included (recovery about 1.9 s), without `--done-wait`. Only
+this relay has been tried.
+
+An `https://` URL with no path needs care: the publisher uses `/` and the
+receiver `/moq`, so they meet in different places on the relay. The client adds
+`/` before it starts either.
 
 ### Result for risk 1 (2026-11-25): the plan above does not work
 

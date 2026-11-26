@@ -23,7 +23,8 @@ RUN set -eu; cmake -S /src -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DMOQ2TS_BUILD_WITH_MOCK_MOQXR=OFF -DMOQXR_SDK_DIR=/sdk; \
     cmake --build /build --target moq2ts-cli --parallel
 
-# moq5 with the picoquic raw QUIC adapter, and moq2ts-receiver on it.
+# moq5 with the picoquic raw QUIC and WebTransport adapters, and moq2ts-receiver
+# on it.
 FROM ${UBUNTU} AS receiver
 # A moq5 with moq_endpoint_cfg_t.done_wait_timeout_us (openmoq/moq5#74).
 ARG MOQ5_COMMIT=573955c166c999d35886ca34cbe2f05fbc1c4de2
@@ -34,6 +35,7 @@ RUN set -eu; git init -q /moq5; cd /moq5; \
     bash scripts/setup_picoquic_deps.sh; \
     . .deps/picoquic-ci/picoquic_deps.env; \
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMOQ_BUILD_ADAPTER_PICOQUIC=ON -DMOQ_BUILD_PQ_THREADED=ON \
+        -DMOQ_BUILD_ADAPTER_PICO_WT=ON -DMOQ_BUILD_PICO_WT_MANAGED=ON \
         -DMOQ_BUILD_SERVICE=ON -DMOQ_BUILD_MPEG2TS=ON -DMOQ_BUILD_MSF=ON -DMOQ_BUILD_TESTS=OFF \
         -DMOQ_BUILD_EXAMPLES=OFF -DMOQ_PICOQUIC_SOURCE_DIR="$MOQ_PICOQUIC_SOURCE_DIR" \
         -DMOQ_PICOTLS_PREFIX="$MOQ_PICOTLS_PREFIX" -DCMAKE_INSTALL_PREFIX=/moq5-install; \

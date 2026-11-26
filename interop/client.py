@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 
 VERSION = '0.1.0'
@@ -139,6 +140,15 @@ def _yaml(mapping, indent):
     return lines
 
 
+def with_path(relay):
+    """An https:// URL with "/" for a missing path: the publisher takes "/" for
+    one and the receiver "/moq", so each would meet the relay elsewhere."""
+    parts = urllib.parse.urlsplit(relay)
+    if parts.scheme == 'https' and not parts.path:
+        parts = parts._replace(path='/')
+    return urllib.parse.urlunsplit(parts)
+
+
 def tap_report(results, relay):
     lines = ['TAP version 14', f'# moq2ts-interop-client v{VERSION}', f'# Relay: {relay}', f'1..{len(results)}']
     for number, result in enumerate(results, 1):
@@ -188,6 +198,7 @@ def main(argv, environ, scenarios=None):
         print(f'unsupported test: {args.test}', file=sys.stderr)
         return 127
     selected = [args.test] if args.test else list(SCENARIOS)
+    args.relay = with_path(args.relay)
 
     def run_one(test_id):
         options = Options(test_id, args.relay, args.tls_disable_verify, args.verbose, dict(environ))
