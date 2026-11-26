@@ -196,6 +196,7 @@ bool RedundantPublisher::publishLiveObjects(const PublishConfig& cfg,
     for (const auto& path : m_paths) {
         path->queue.close();
     }
+    m_closeDelay = std::chrono::milliseconds(cfg.closeDelayMs);
     waitForPaths();
     for (std::thread& thread : threads) {
         thread.join();
@@ -245,7 +246,10 @@ void RedundantPublisher::waitForPaths() {
             // may only be slow (no subscriber yet, a session that ends), so it
             // gets longer.
             const bool slowToStart = counters.popped == 0 || endSeen[index];
-            const std::chrono::milliseconds limit = slowToStart ? m_idleTimeout : m_drainTimeout;
+            std::chrono::milliseconds limit = slowToStart ? m_idleTimeout : m_drainTimeout;
+            if (endSeen[index]) {
+                limit += m_closeDelay;
+            }
             if (now - progress[index] >= limit) {
                 qWarning("path=%d: %s %s for %lld ms after the source ended (%lld Objects left); stopping it.",
                          static_cast<int>(index), qUtf8Printable(path.endpoint),

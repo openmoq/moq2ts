@@ -1,4 +1,5 @@
 #include "MoqxrPublisher.h"
+#include "CloseDelay.h"
 #include "LiveSourceEnd.h"
 #include "ObjectLookahead.h"
 #include "ReconnectPolicy.h"
@@ -488,6 +489,14 @@ bool MoqxrPublisher::publishLiveObjects(const PublishConfig& cfg,
                     return true;   // stopped while waiting
                 }
                 continue;
+            }
+            // The relay reads the end of the stream before the close (see
+            // CloseDelay.h). stop() takes the publisher and ends the wait.
+            if (holdsBeforeClose(status.ok, sourceEnded, cfg.liveSource, state->sourceEnd.endedBroadcast())) {
+                waitWhile(std::chrono::milliseconds(cfg.closeDelayMs), [this, &running] {
+                    QMutexLocker locker(&m_mutex);
+                    return m_connected && running.load(std::memory_order_acquire);
+                });
             }
             // Only one thread disconnects a Publisher. stop() takes m_activePublisher
             // first when it interrupts a publish; the disconnect here is for the

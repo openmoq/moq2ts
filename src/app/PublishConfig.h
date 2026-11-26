@@ -27,6 +27,9 @@ inline constexpr qint64 kMaxAuthTokenType = (qint64{1} << 62) - 1;
 inline constexpr int kMinQuicIdleTimeoutMs = 1000;
 inline constexpr int kMaxQuicIdleTimeoutMs = 600000;
 
+// The largest --close-delay.
+inline constexpr int kMaxCloseDelayMs = 60000;
+
 struct PublishConfig {
     QString moqEndpoint = "mock://local";
     // The relays to publish to when there are several (--endpoint given more
@@ -84,6 +87,10 @@ struct PublishConfig {
     // The QUIC idle timeout offered to the relay, in ms: a relay that vanished
     // is noticed within it. 0 keeps the moqxr default, 30 s.
     int quicIdleTimeoutMs = 0;
+    // How long the session stays open after the whole source went out, before
+    // the publisher closes it (--close-delay; see CloseDelay.h). 0 closes at
+    // once.
+    int closeDelayMs = 2000;
     // The media timeline track of a live track. The editor's copy of MSF asks a
     // publisher to trim it to the track's accessibleWindowTime; the catalog
     // declares that window, and the timeline keeps the records inside it. 0

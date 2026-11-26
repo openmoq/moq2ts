@@ -564,6 +564,16 @@ if(UNIX AND NOT APPLE)
     add_test(NAME moq2ts-redundant-publisher-tests COMMAND moq2ts-redundant-publisher-tests)
     set_tests_properties(moq2ts-redundant-publisher-tests PROPERTIES TIMEOUT 60)
 
+    add_executable(moq2ts-close-delay-tests tests/close_delay_test.cpp)
+    target_include_directories(moq2ts-close-delay-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(moq2ts-close-delay-tests PRIVATE moq2ts-core)
+    add_test(NAME moq2ts-close-delay-tests COMMAND moq2ts-close-delay-tests)
+    # The range of --close-delay.
+    add_test(NAME moq2ts-cli-close-delay COMMAND moq2ts-cli --close-delay 60001
+             --endpoint mock://local --namespace a --video none.ts)
+    set_tests_properties(moq2ts-cli-close-delay PROPERTIES
+        PASS_REGULAR_EXPRESSION "--close-delay must be")
+
     add_executable(moq2ts-reconnect-policy-tests tests/reconnect_policy_test.cpp)
     target_include_directories(moq2ts-reconnect-policy-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME moq2ts-reconnect-policy-tests COMMAND moq2ts-reconnect-policy-tests)
