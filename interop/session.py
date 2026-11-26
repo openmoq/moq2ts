@@ -211,7 +211,9 @@ def _feed(publisher, data, first, duration, start, stop_at=None):
         time.sleep(max(0.0, start + stop_at - time.monotonic()))
 
 
-_FIRST_OBJECT = re.compile(r'^\[rx\] first object group=(\d+) ')
+# The first object of a receiver, or the jump to the new publisher's Groups
+# where a relay keeps the subscription across the restart.
+_NEW_GROUP = re.compile(r'^\[rx\] (?:first object|MOQT gap before) group=(\d+) ')
 
 
 def run_restart(fixture, namespace, draft, options):
@@ -253,7 +255,7 @@ def run_restart(fixture, namespace, draft, options):
             def on_line(line):
                 if line == '[rx] subscription active':
                     subscribed.set()
-                match = _FIRST_OBJECT.match(line)
+                match = _NEW_GROUP.match(line)
                 if match and int(match.group(1)) >= RESTART_GROUP_ID and not recovered:
                     recovered.append(time.monotonic())
 
@@ -266,6 +268,7 @@ def run_restart(fixture, namespace, draft, options):
                  '--out', str(paths[0]), '--object-log', str(paths[1]),
                  '--duration', str(int(options.deadline) + 5), *insecure],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            result.receiver_log = paths[2]
             return process, _Follower(process.stderr, paths[2], '[rx] track ended', on_line), paths
 
         first, ready, watchdog = publisher([], result.publisher_log)
@@ -279,6 +282,8 @@ def run_restart(fixture, namespace, draft, options):
             while not subscribed.wait(0.05) and runs[0][0].poll() is None and time.monotonic() < waited_until:
                 pass
             if not subscribed.is_set():
+                if runs[0][0].poll() is not None:
+                    runs[0][1].thread.join(1)
                 result.error = 'the subscription did not become active'
                 return result
             start = time.monotonic() - lead / len(packet_list) * options.duration
@@ -322,13 +327,14 @@ def run_restart(fixture, namespace, draft, options):
                     if capture.exists() and log.exists():
                         received.write(capture.read_bytes())
                         objects.write(log.read_bytes())
-            result.receiver_log = runs[-1][2][2]
             if announced and recovered:
                 result.recovery_ms = int(max(0.0, recovered[0] - announced[0]) * 1000)
             if failure:
                 result.error = failure[0]
             elif result.received.stat().st_size == 0:
                 result.error = 'no capture'
+            if result.error and (workdir / 'publisher-2.log').exists():
+                result.publisher_log = workdir / 'publisher-2.log'
         finally:
             for timer in watchdogs:
                 timer.cancel()

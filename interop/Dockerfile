@@ -13,7 +13,7 @@ RUN set -eu; apt-get update; \
         qt6-base-dev libgl1-mesa-dev libssl-dev libopenh264-dev libavcodec-dev libavdevice-dev libavformat-dev \
         libavutil-dev libswresample-dev libswscale-dev libopus-dev libsrt-openssl-dev
 RUN set -eu; test -n "$MOQXR_VERSION"; mkdir -p /sdk; \
-    curl -fsSL "https://github.com/openmoq/moqxr/releases/download/${MOQXR_VERSION}/openmoq-publisher-${MOQXR_VERSION}-Linux.tar.gz" \
+    curl -fsSL --retry 5 --retry-all-errors "https://github.com/openmoq/moqxr/releases/download/${MOQXR_VERSION}/openmoq-publisher-${MOQXR_VERSION}-Linux.tar.gz" \
         | tar xz -C /sdk --strip-components=1
 COPY CMakeLists.txt /src/CMakeLists.txt
 COPY src /src/src
@@ -54,7 +54,7 @@ ARG TSDUCK_SHA256=0023689f76e75b64e45253771208bcf8ca95b91fbfd0900da097c729f3c39f
 RUN set -eu; apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates curl ffmpeg python3; \
     deb=/tmp/tsduck.deb; \
-    curl -fsSL -o "$deb" "https://github.com/tsduck/tsduck/releases/download/v${TSDUCK_VERSION}/tsduck_${TSDUCK_VERSION}.ubuntu24_amd64.deb"; \
+    curl -fsSL --retry 5 --retry-all-errors -o "$deb" "https://github.com/tsduck/tsduck/releases/download/v${TSDUCK_VERSION}/tsduck_${TSDUCK_VERSION}.ubuntu24_amd64.deb"; \
     echo "${TSDUCK_SHA256}  $deb" | sha256sum -c -; \
     apt-get install -y --no-install-recommends "$deb"; rm -f "$deb"; \
     tsp --version
@@ -66,7 +66,7 @@ ARG RUNNER_REPO=t0ms/moq-interop-runner
 ARG RUNNER_COMMIT=d2fbb0221c70aca01b42754b9924c007c8cb26e1
 RUN set -eu; base="https://raw.githubusercontent.com/${RUNNER_REPO}/${RUNNER_COMMIT}/lib/media/mpeg-ts"; \
     mkdir -p /runner/test /fixture; cd /runner; \
-    for f in make-fixture.sh check-ts.py splice-step.py test/test-check-ts.sh; do curl -fsSL -o "$f" "$base/$f"; done; \
+    for f in make-fixture.sh check-ts.py splice-step.py test/test-check-ts.sh; do curl -fsSL --retry 5 --retry-all-errors -o "$f" "$base/$f"; done; \
     bash make-fixture.sh /fixture/fixture.ts; \
     bash make-fixture.sh --step /fixture/fixture-step.ts; \
     bash make-fixture.sh --mpts /fixture/fixture-mpts.ts; \
@@ -82,6 +82,8 @@ COPY --from=receiver /build/moq2ts-receiver /app/moq2ts-receiver
 COPY --from=fixtures /fixture /app/fixture
 COPY --from=fixtures /runner/check-ts.py /app/check-ts.py
 COPY interop/client.py interop/scenarios.py interop/session.py interop/tsfile.py /app/
-# Every shared library of both binaries is present.
-RUN set -eu; ! ldd /app/moq2ts-cli /app/moq2ts-receiver | grep -q 'not found'; /app/moq2ts-cli --version
+# Every shared library of both binaries is present. (set -e ignores a command
+# negated with !, so the check exits by itself.)
+RUN set -eu; libraries="$(ldd /app/moq2ts-cli /app/moq2ts-receiver)"; \
+    if echo "$libraries" | grep 'not found'; then exit 1; fi; /app/moq2ts-cli --version
 ENTRYPOINT ["python3", "/app/client.py"]

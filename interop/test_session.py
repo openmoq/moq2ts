@@ -28,8 +28,11 @@ MODE = os.environ.get('STUB_MODE', '')
 
 PUBLISHER = COMMON + '''
 event(who='pub', argv=sys.argv[1:])
-if MODE == 'restart':
+if MODE.startswith('restart'):
     second = '--initial-group-id' in sys.argv
+    if second and MODE == 'restart-refused-again':
+        print('[error] the namespace was refused', flush=True)
+        sys.exit(1)
     sys.stdin.buffer.read(int(os.environ['STUB_LEAD']) * 188)
     print('[ready] namespace accepted', flush=True)
     rest = sys.stdin.buffer.read()
@@ -54,6 +57,20 @@ open(f'{DIR}/eof', 'w').close()
 
 RECEIVER = COMMON + '''
 event(who='rx', argv=sys.argv[1:])
+if MODE == 'restart-refused':
+    print('receiver fatal code=4', file=sys.stderr, flush=True)
+    sys.exit(1)
+if MODE == 'restart-kept':
+    # A relay that keeps the subscription: one receiver sees both publishers.
+    print('[rx] subscription active', file=sys.stderr, flush=True)
+    print('[rx] first object group=0 object=0', file=sys.stderr, flush=True)
+    while not os.path.exists(f'{DIR}/eof2'):
+        time.sleep(0.05)
+    print('[rx] MOQT gap before group=1000 object=0', file=sys.stderr, flush=True)
+    open(arg('--out'), 'wb').write(bytes([1]) * 376)
+    open(arg('--object-log'), 'w').write('0 0 188\\n1000 0 188\\n')
+    print('[rx] track ended', file=sys.stderr, flush=True)
+    sys.exit(0)
 if MODE.startswith('restart'):
     count = len([n for n in os.listdir(DIR) if n.startswith('rxrun')]) + 1
     open(f'{DIR}/rxrun{count}', 'w').close()
@@ -195,8 +212,8 @@ class SessionTest(unittest.TestCase):
         for first, g, g_ok in ((None, 7, 8), (8, None, 8), (8, 7, None)):
             self.assertFalse(scenarios.join_point(first, g, g_ok).ok)
 
-    def restart(self, **overrides):
-        os.environ['STUB_MODE'] = 'restart'
+    def restart(self, mode='restart', **overrides):
+        os.environ['STUB_MODE'] = mode
         options = session.SessionOptions(
             cli=self.environ['MOQ2TS_CLI'], receiver=self.environ['MOQ2TS_RECEIVER'], relay='moqt://r:1',
             insecure=True, workdir=self.dir / 'work', duration=2.0, ready_timeout=3, end_timeout=3,
@@ -221,6 +238,22 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(result.subscriptions, ['track ended (exit 0)', 'track ended (exit 0)'])
         self.assertGreaterEqual(result.recovery_ms, 0)
         self.assertLess(result.recovery_ms, 3000)
+
+    def test_recovery_is_timed_on_a_subscription_that_survives_the_restart(self):
+        result = self.restart('restart-kept')
+        self.assertIsNone(result.error)
+        self.assertEqual(result.subscriptions, ['track ended (exit 0)'])
+        self.assertIsNotNone(result.recovery_ms)
+
+    def test_a_restart_that_never_subscribes_reports_the_receivers_log(self):
+        result = self.restart('restart-refused')
+        self.assertEqual(result.error, 'the subscription did not become active')
+        self.assertIn('receiver: receiver fatal code=4', result.log_tail())
+
+    def test_a_second_publisher_that_fails_is_in_the_log_tail(self):
+        result = self.restart('restart-refused-again', deadline=3.0)
+        self.assertEqual(result.error, 'the new publisher was not ready')
+        self.assertIn('publisher: [error] the namespace was refused', result.log_tail())
 
     def test_recovery_is_five_seconds_from_the_new_publisher(self):
         self.assertTrue(scenarios.recovery(0).ok)
