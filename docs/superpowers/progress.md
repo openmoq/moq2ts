@@ -4,24 +4,19 @@ Last updated: 2026-11-25. Update this file when work stops.
 
 ## Resume here
 
-1. `git switch feat/interop-client` (local, not pushed).
-2. Executing `docs/superpowers/plans/2026-11-25-interop-client-image.md` natively.
-   Tasks 1 to 6 are done and committed.
-3. The five scenarios run at once to fit the 120 s limit (`MEDIA_SEQUENTIAL=1`
-   for one at a time). Full run in the image 24 to 26 s.
-4. **Tail loss: fixed on branch `fix/close-delay` (off `main`), not pushed.**
-   The publisher closed once its data was acknowledged; the relay (moq-dev,
-   draft 18) then sometimes never forwarded the last Objects, with no gap
-   reported (about 1 concurrent full run in 8). `--close-delay` (default
-   2000 ms) holds the session after a clean end. With the fix 45 of 45 full
-   runs passed; unpatched control failed at run 10. Reviewed (fable); one real
-   finding fixed (redundant relays cut a long delay at 30 s). Ask before push
-   and PR. Until it merges, concurrent runs from this branch can fail; rebase
-   this branch on `main` afterwards. No automated test covers the call from the
-   real publish path (needs a relay). Relay behaviour is inferred, not checked
-   in its code, and not reported upstream.
-5. Then Task 7 (WebTransport), Task 8 (CI publish; needs a PR), Task 9 (runner
-   entry; ask first), and one review of the whole branch.
+1. `git switch feat/interop-client` (local, not pushed), rebased on `main`
+   after #85.
+2. Plan `docs/superpowers/plans/2026-11-25-interop-client-image.md`: Tasks 1 to
+   7 done. Task 8 (CI builds and publishes the image) is committed but has not
+   run on GitHub. The whole-branch review is done and its findings fixed;
+   deferred minor points are in the ledger.
+3. Next: push and open the PR (ask first). After the first `v*` tag the ghcr
+   package has to be made public by hand.
+4. Task 9 (runner entry) waits for moq-interop-runner#209; ask first.
+5. The tail loss is fixed by #85 (`--close-delay`); the rebased image passed
+   45 of 45 full runs.
+6. Not filed: with an `https://` URL that has no path, the publisher uses `/`
+   and the receiver `/moq`. The client works around it.
 
 ## Waiting on others
 
