@@ -25,15 +25,19 @@ public:
         // The closing Object is the source's last, so a "nothing yet" that
         // follows it must not read as a source that goes on.
         if (ready->object.endsBroadcast) {
+            m_endedBroadcast.store(true, std::memory_order_release);
             m_finished.store(true, std::memory_order_release);
         }
         return ready;
     }
 
     bool finished() const { return m_finished.load(std::memory_order_acquire); }
+    // Whether the source gave the Object that ends the broadcast.
+    bool endedBroadcast() const { return m_endedBroadcast.load(std::memory_order_acquire); }
 
 private:
     std::atomic<bool> m_finished{false};
+    std::atomic<bool> m_endedBroadcast{false};
 };
 
 } // namespace moq2ts

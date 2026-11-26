@@ -444,6 +444,10 @@ int main(int argc, char** argv) {
              QStringLiteral("The token type of the authorization token, as the relay expects it (moqx: "
                             "auth.token_type)."),
              QStringLiteral("type"), QStringLiteral("16"));
+    addValue(QStringLiteral("close-delay"),
+             QStringLiteral("Time in ms that the session stays open after the whole source went out, so that the "
+                            "relay reads the end of it before the close. 0 closes at once."),
+             QStringLiteral("ms"), QStringLiteral("2000"));
     addValue(QStringLiteral("quic-idle-timeout"),
              QStringLiteral("The QUIC idle timeout offered to the relay, in ms: a relay that vanished, for example "
                             "after a restart, is noticed within it. Below 5000 ms it also shortens each "
@@ -546,6 +550,15 @@ int main(int argc, char** argv) {
             logLine(stderr, "error", QStringLiteral("--quic-idle-timeout must be 0 or a number of ms from %1 to %2.")
                                          .arg(moq2ts::kMinQuicIdleTimeoutMs)
                                          .arg(moq2ts::kMaxQuicIdleTimeoutMs));
+            return 2;
+        }
+    }
+    {
+        bool delayOk = false;
+        cfg.closeDelayMs = parser.value(QStringLiteral("close-delay")).toInt(&delayOk);
+        if (!delayOk || cfg.closeDelayMs < 0 || cfg.closeDelayMs > moq2ts::kMaxCloseDelayMs) {
+            logLine(stderr, "error", QStringLiteral("--close-delay must be a number of ms from 0 to %1.")
+                                         .arg(moq2ts::kMaxCloseDelayMs));
             return 2;
         }
     }
