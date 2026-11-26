@@ -46,6 +46,8 @@ public:
     // for its first subscriber, or is still connecting), or that has taken the
     // end of its queue and has not finished its session (the final catalog or
     // the FIN is not acknowledged), is given this long before it is stopped.
+    // One that has taken the end gets PublishConfig::closeDelayMs on top,
+    // since its publisher holds the session that long before it closes it.
     static constexpr std::chrono::seconds kIdleTimeout{30};
 
     explicit RedundantPublisher(QObject* parent = nullptr);
@@ -128,6 +130,8 @@ private:
     std::int64_t m_queueBytes = kPathQueueBytes;
     std::chrono::milliseconds m_drainTimeout{kDrainTimeout};
     std::chrono::milliseconds m_idleTimeout{kIdleTimeout};
+    // PublishConfig::closeDelayMs of the current publish.
+    std::chrono::milliseconds m_closeDelay{0};
     // The endpoints the paths were made for.
     QStringList m_endpoints;
     // Made by the first connect(), on the thread that owns this object. A

@@ -144,6 +144,12 @@ public:
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
         }
+        // As a MoqxrPublisher that holds its session open before the close.
+        for (const auto until = std::chrono::steady_clock::now() + holdAfterEnd;
+             std::chrono::steady_clock::now() < until && m_connected;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        stoppedBeforeReturn = !m_connected;
         return true;
     }
     void stop() override { m_connected = false; }
@@ -159,6 +165,9 @@ public:
     // broadcast, until stop().
     int stallAfter = -1;
     bool hangAtEnd = false;
+    // How long it takes to return once its source has ended.
+    std::chrono::milliseconds holdAfterEnd{0};
+    bool stoppedBeforeReturn = false;
 
 private:
     bool m_fails = false;
@@ -531,7 +540,8 @@ int main() {
             },
             moq2ts::kPathQueueBytes);
         publisher.setTimeouts(std::chrono::milliseconds(120), std::chrono::milliseconds(400));
-        const PublishConfig cfg = twoRelays();
+        PublishConfig cfg = twoRelays();
+        cfg.closeDelayMs = 0;
         ok &= expect(publisher.connect(cfg), std::string("timeout ") + c.label + ": connects");
         std::deque<PublishedObject> script;
         appendGroup(script, 0);
@@ -555,6 +565,42 @@ int main() {
         ok &= expect(took >= c.least && took <= c.most,
                      std::string("timeout ") + c.label + ": the hung path is stopped after its limit, not before or never (" +
                          std::to_string(took.count()) + " ms)");
+    }
+
+    // A path that has taken the end holds its session for the close delay
+    // before it finishes: that time does not count as hanging.
+    {
+        std::vector<TestPath*> paths;
+        RedundantPublisher publisher(
+            [&paths](int) {
+                auto path = std::make_unique<TestPath>();
+                path->holdAfterEnd = std::chrono::milliseconds(700);
+                paths.push_back(path.get());
+                return path;
+            },
+            moq2ts::kPathQueueBytes);
+        publisher.setTimeouts(std::chrono::milliseconds(120), std::chrono::milliseconds(400));
+        PublishConfig cfg = twoRelays();
+        cfg.closeDelayMs = 600;
+        ok &= expect(publisher.connect(cfg), "close delay: connects");
+        std::deque<PublishedObject> script;
+        appendGroup(script, 0);
+        script.push_back(catalog(1, true));
+        std::atomic<bool> running{true};
+        publisher.publishLiveObjects(
+            cfg, QStringLiteral("v"), {QStringLiteral("v.timeline")}, QByteArray("{}"),
+            [&script]() -> std::optional<PublishedObject> {
+                if (script.empty()) {
+                    return std::nullopt;
+                }
+                PublishedObject next = script.front();
+                script.pop_front();
+                return next;
+            },
+            running);
+        for (const TestPath* path : paths) {
+            ok &= expect(!path->stoppedBeforeReturn, "close delay: a path is not stopped while it holds its session");
+        }
     }
 
     // The relays of a publisher stay those of its first connect().
