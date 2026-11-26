@@ -4,10 +4,12 @@
 Follows the runner's docs/TEST-CLIENT-INTERFACE.md and docs/tests/media/:
 TAP 14 on stdout, one test point per scenario with a subtest per check.
 Exit 0 when every selected scenario passes, 1 on a failure, 127 for a test
-this client does not expose.
+this client does not expose. Selected scenarios run at once; MEDIA_SEQUENTIAL=1
+runs them one at a time.
 """
 
 import argparse
+import concurrent.futures
 import contextlib
 import json
 import os
@@ -187,8 +189,7 @@ def main(argv, environ, scenarios=None):
         return 127
     selected = [args.test] if args.test else list(SCENARIOS)
 
-    results = []
-    for test_id in selected:
+    def run_one(test_id):
         options = Options(test_id, args.relay, args.tls_disable_verify, args.verbose, dict(environ))
         started = time.monotonic()
         if test_id not in scenarios:
@@ -199,7 +200,14 @@ def main(argv, environ, scenarios=None):
             except Exception as error:   # a scenario that breaks is a failed one
                 result = Result(test_id, [Check('run', False, f'{type(error).__name__}: {error}')])
         result.diag.setdefault('duration_ms', int((time.monotonic() - started) * 1000))
-        results.append(result)
+        return result
+
+    # The scenarios play 20 s streams each, in namespaces of their own: at once
+    # they fit the runner's time budget, one after another they do not.
+    # MEDIA_SEQUENTIAL runs them one at a time, to tell a fault from load.
+    workers = 1 if environ.get('MEDIA_SEQUENTIAL') in ('1', 'true') else len(selected)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(run_one, selected))
     sys.stdout.write(tap_report(results, args.relay))
     sys.stdout.flush()
     return 0 if all(r.passed or r.skipped for r in results) else 1

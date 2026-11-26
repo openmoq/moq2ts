@@ -71,6 +71,13 @@ joins the captures and times the recovery. The publisher runs with
 **Catalog check.** Skipped, and reported as skipped, in the first version:
 moq5's media receiver was not found to expose the raw catalog.
 
+**Time budget.** The runner gives one client run 120 s. The five scenarios take
+112 to 114 s one after another on a draft-22 relay, and more where draft 22 is
+tried first and refused, so the client runs them at once, each in its own
+namespace (27 s). The cost: five streams load the relay together, so a relay
+could fail a scenario it passes alone. `MEDIA_SEQUENTIAL=1` runs them one at a
+time. Chosen over registering two entries.
+
 ## Risks, to be tested first
 
 1. **Start of the stream.** The scenarios subscribe before media starts, and the

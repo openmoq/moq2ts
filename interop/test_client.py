@@ -3,6 +3,7 @@ import io
 import signal
 import subprocess
 import sys
+import threading
 import time
 import unittest
 
@@ -131,6 +132,35 @@ class MainTest(unittest.TestCase):
             code, _ = run_main(['--test', 'ts-clock-step'],
                                {'RELAY_URL': 'moqt://r:1', 'TLS_DISABLE_VERIFY': value}, {'ts-clock-step': fail})
             self.assertEqual((code, seen), (1, [('moqt://r:1', True)]))
+
+    def test_scenarios_run_at_once_and_report_in_order(self):
+        # Each waits for all the others: only concurrent runs get past this.
+        together = threading.Barrier(len(SCENARIOS), timeout=5)
+
+        def meet(options):
+            together.wait()
+            return passing(options)
+
+        code, out = run_main([], {}, {name: meet for name in SCENARIOS})
+        self.assertEqual(code, 0, out)
+        self.assertEqual([line.split()[3] for line in out.splitlines() if line.startswith('ok ')], SCENARIOS)
+
+    def test_media_sequential_runs_one_at_a_time(self):
+        running, most = [0], [0]
+        lock = threading.Lock()
+
+        def count(options):
+            with lock:
+                running[0] += 1
+                most[0] = max(most[0], running[0])
+            time.sleep(0.05)
+            with lock:
+                running[0] -= 1
+            return passing(options)
+
+        for value in ('1', 'true'):
+            code, _ = run_main([], {'MEDIA_SEQUENTIAL': value}, {name: count for name in SCENARIOS})
+            self.assertEqual((code, most[0]), (0, 1))
 
     def test_a_scenario_that_raises_is_not_ok(self):
         def boom(options):
